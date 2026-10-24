@@ -25,11 +25,17 @@ if ($Toolchain -eq 'Zig') {
     $common = @('c++', '-target', 'x86-windows-gnu', '-std=c++17', '-DUNICODE', '-D_UNICODE',
                 '-D_WIN32_WINNT=0x0a00', '-Wall', '-Wextra', '-Wpedantic')
     if ($Configuration -eq 'Release') { $common += '-O2' } else { $common += @('-O0', '-g') }
-    Invoke-Checked $zig ($common + @('-shared', (Join-Path $root 'src/fix.cpp'),
-        (Join-Path $root 'src/fix.def'), '-luser32', '-lcomctl32', '-o', (Join-Path $build 'LakeWindowedFix.dll')))
+    Invoke-Checked $zig ($common + @('-shared', (Join-Path $root 'src/fix.cpp'), (Join-Path $root 'src/ddraw_scale.cpp'),
+        (Join-Path $root 'src/fix.def'), '-luser32', '-lcomctl32', '-lgdi32', '-o', (Join-Path $build 'LakeWindowedFix.dll')))
     Invoke-Checked $zig ($common + @((Join-Path $root 'src/launcher.cpp'), '-lbcrypt', '-municode',
         '-o', (Join-Path $build 'LakeWindowedLauncher.exe')))
     if (!$SkipTests) {
+        Invoke-Checked $zig ($common + @((Join-Path $root 'tests/scale_geometry_test.cpp'),
+            '-municode', '-o', (Join-Path $build 'LakeFixScaleGeometryTest.exe')))
+        Invoke-Checked $zig ($common + @((Join-Path $root 'tests/presenter_test.cpp'), (Join-Path $root 'src/ddraw_scale.cpp'),
+            '-luser32', '-municode', '-o', (Join-Path $build 'LakeFixPresenterTest.exe')))
+        Invoke-Checked (Join-Path $build 'LakeFixScaleGeometryTest.exe') @()
+        Invoke-Checked (Join-Path $build 'LakeFixPresenterTest.exe') @()
         Invoke-Checked $zig ($common + @('-shared', (Join-Path $root 'tests/renderer_fixture.cpp'),
             '-luser32', '-o', (Join-Path $build 'Contour.dll')))
         Invoke-Checked $zig ($common + @((Join-Path $root 'tests/fixture.cpp'), '-luser32', '-municode',
@@ -39,6 +45,7 @@ if ($Toolchain -eq 'Zig') {
         & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 0
         & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 1
         & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 0 -ExpectedExit 23
+        & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 0 -ScaleRendering
     }
     Copy-Item (Join-Path $build 'LakeWindowedFix.dll'), (Join-Path $build 'LakeWindowedLauncher.exe') $dist
 } else {

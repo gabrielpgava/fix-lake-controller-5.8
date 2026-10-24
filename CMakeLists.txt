@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(lake_controller_windowed_fix VERSION 0.3.0 LANGUAGES CXX)
+project(lake_controller_windowed_fix VERSION 0.4.0 LANGUAGES CXX)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     message(FATAL_ERROR "Windows x86 required. MSVC: -A Win32. MinGW: i686 toolchain.")
@@ -9,14 +9,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_compile_definitions(UNICODE _UNICODE _WIN32_WINNT=0x0a00)
 
-add_library(LakeWindowedFix SHARED src/fix.cpp)
+add_library(LakeWindowedFix SHARED src/fix.cpp src/ddraw_scale.cpp)
 set_target_properties(LakeWindowedFix PROPERTIES PREFIX "")
 if(MSVC)
     target_sources(LakeWindowedFix PRIVATE src/fix-msvc.def)
 else()
     target_sources(LakeWindowedFix PRIVATE src/fix.def)
 endif()
-target_link_libraries(LakeWindowedFix PRIVATE user32 comctl32)
+target_link_libraries(LakeWindowedFix PRIVATE user32 comctl32 gdi32)
 add_executable(LakeWindowedLauncher src/launcher.cpp)
 target_link_libraries(LakeWindowedLauncher PRIVATE bcrypt)
 
@@ -46,6 +46,13 @@ if(BUILD_TESTING)
     target_compile_definitions(LakeFixInjectionTest PRIVATE LAKE_FIX_TESTING)
     target_link_libraries(LakeFixInjectionTest PRIVATE bcrypt)
     add_dependencies(LakeFixInjectionTest LakeWindowedFix LakeFixFixture FakeContour)
+    add_executable(LakeFixScaleGeometryTest tests/scale_geometry_test.cpp)
+    add_executable(LakeFixPresenterTest tests/presenter_test.cpp src/ddraw_scale.cpp)
+    target_link_libraries(LakeFixPresenterTest PRIVATE user32)
+    lake_warnings(LakeFixScaleGeometryTest)
+    lake_warnings(LakeFixPresenterTest)
+    add_test(NAME scale_geometry COMMAND LakeFixScaleGeometryTest)
+    add_test(NAME scaled_presenter_objects COMMAND LakeFixPresenterTest)
     lake_warnings(FakeContour)
     lake_warnings(LakeFixFixture)
     lake_warnings(LakeFixInjectionTest)
@@ -58,7 +65,10 @@ if(BUILD_TESTING)
     add_test(NAME windows_exit_observer COMMAND powershell.exe -NoProfile -File
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/Run-Fixture.ps1"
         -BinaryDirectory "$<TARGET_FILE_DIR:LakeWindowedFix>" -NativeResize 0 -ExpectedExit 23)
-    set_tests_properties(windows_safe_no_rebuild windows_experimental_resize windows_exit_observer
+    add_test(NAME windows_scaled_window COMMAND powershell.exe -NoProfile -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/Run-Fixture.ps1"
+        -BinaryDirectory "$<TARGET_FILE_DIR:LakeWindowedFix>" -NativeResize 0 -ScaleRendering)
+    set_tests_properties(windows_safe_no_rebuild windows_experimental_resize windows_exit_observer windows_scaled_window
         PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()
 

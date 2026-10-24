@@ -1,44 +1,47 @@
 # Lake Controller Windowed Fix
 
-Shim de compatibilidade **experimental**, MIT, para **Lake Controller 5.8 Build 007, x86**, no Windows 10/11. O objetivo é oferecer título, bordas, movimento, minimizar/restaurar e redimensionamento sem entrar no caminho de fullscreen exclusivo legado. **A 0.3 usa tamanho fixo por padrão: ainda não é a correção completa do objetivo de resize livre.**
+Shim de compatibilidade **experimental**, MIT, para **Lake Controller 5.8 Build 007, x86**, voltado ao Windows 10/11. A **0.4 foi compilada e operada em OFFLINE no Windows 11, a 125% DPI**, com janela redimensionável, interface completa e mouse ajustado. **648 verificações sintéticas passaram, zero falhas.** Isso não valida outras GPUs, Windows 10 ou áudio em produção.
 
-## Atualização 0.3: tamanho fixo diagnóstico e registro de saída
+## 0.4: janela redimensionável, controles maiores e canvas fixo
 
-- **`[compatibility] NativeResize=0` é o padrão.** Preserva o tamanho original do framebuffer, não envia o `WM_SIZE` inicial nem encaminha o resize do host ao rebuild nativo. Desabilita a alça de redimensionamento e maximizar; `Width`/`Height` são ignorados. A janela pode ultrapassar a área útil do monitor ou ficar recortada.
-- A correção de visibilidade da 0.2 foi mantida. `NativeResize=1` permite resize/rebuild e as dimensões configuradas, mas é **EXPERIMENTAL** e deve ser testado separadamente.
-- O novo **`--wait`** mantém o launcher aguardando o encerramento do aplicativo, consulta `GetExitCodeProcess` e imprime/grava o código em decimal e hexadecimal. Na espera normal, não há timeout que mate o Lake; timeouts de falha de inicialização continuam separados.
-- A DLL registra mensagens de fechamento, `WM_DISPLAYCHANGE`, chamadas cobertas de `PostQuitMessage`/`ExitProcess` e algumas exceções de primeira chance. **Não bloqueia a saída, não descarta `WM_DISPLAYCHANGE` e não trata essas exceções.** `HostSetupCompleted` significa apenas setup da janela, não saúde do renderer/GPU.
-- O fechamento preserva um quit nativo pendente da thread da interface, sem usar quits de workers. Registros de saída são de melhor esforço, sem esperar pelo lock do logger; o relatório final tenta `%TEMP%` também após falha de abertura/escrita local.
+- O novo padrão é **`ScaleRendering=1` e `NativeResize=0`**. A moldura privada `LakeWindowedFix.ScaledHost.v1` tem título, bordas, resize, maximizar e minimizar. A janela começa com área cliente de **1024×576 pixels lógicos**, ajustada à área útil; o mínimo interativo é **320×180**.
+- O renderer mantém um canvas virtual **fixo de 1088×612**, cerca de **29% menor em cada dimensão** que o candidato 1536×864, para melhorar a leitura dos controles na mesma janela. É definido antes de construir a interface, não reduzido durante o resize. A barra completa foi verificada no ensaio real.
+- Resize/restaurar não encaminham `WM_SIZE` a `ContourParent` nem solicitam seu teardown/rebuild. A observação final registrou **9.315 apresentações com HRESULT 0 e nenhuma chamada de criação de superfície** durante a amostra de resize/movimento/foco; não cobre toda a árvore gráfica ou toda a vida do aplicativo.
+- `WrapDirectDraw7` usa proxies próprios completos: 30 entradas de `IDirectDraw7` e 49 da primária, com assinatura SDK e `this` real. **O `lpVtbl` nativo nunca é alterado.** O probe DirectDraw real confirmou QI de D3D7 e cooperação preservadas; o clone intermediário foi descartado.
+- A apresentação adapta o **`Blt` da primária com fonte inteira**, consultando `GetSurfaceDesc`, preservando proporção e letterbox preto. Superfícies offscreen continuam nativas para o D3D7; fontes que sejam proxies são desembrulhadas antes do `Blt` real. O clipper pode ser associado ao host visível, sem mudar as flags originais de `SetCooperativeLevel`. **Não há port D3D7 → D3D11, sucesso DirectDraw forçado ou capacidades falsificadas.**
+- A integração combina **IAT + proxies + seed guardado de dois dados de layout do Build 007**, após a seleção nativa de modo. O ensaio confirmou layout e superfície fonte em **1088×612**. Não altera arquivos proprietários, `GetDeviceCaps` ou capacidades; detalhes dos dados em memória estão em [ANALYSIS.md](docs/ANALYSIS.md).
+- O mouse faz hit-test nos HWNDs filhos em coordenadas virtuais: a posição física pode atingir `WorkWindow` enquanto a imagem mostra `ButtonBar`. O main escala `lParam` no dispatch; filhos recebem coordenadas locais virtuais uma vez. Menus e diálogos foram operados; touch, IME e outros controles continuam sem validação universal.
+- Se o driver recusar `COLORFILL` na primária, as faixas pretas usam GDI **somente dentro do host**. A apresentação continua devolvendo seu HRESULT real, sem mascarar erros do desenho principal.
 
-No reteste real da **0.2**, iniciado pelo usuário (PID histórico `14208`), o log chegou a `Native resize complete`, `Initial placement complete` e `Native windowed host ready`, mas o processo depois fechou. Não foi encontrado evento Aplicativo 1000/1001/1002 correspondente nem dump. **Não sabemos se foi crash ou saída normal; o rebuild é um risco identificado estaticamente, não uma causa confirmada.** Veja [R2 em ANALYSIS.md](docs/ANALYSIS.md#r2--encerramento-após-o-setup-da-02-e-diagnóstico-na-03).
+Foram operados resize por borda, formatos 4:3/16:9, mínimo 320×180 lógico, maximização maior que o HWND-canvas, movimento, wheel, minimizar/restaurar e um ciclo Alt+Tab. A sessão final encerrou por **Quit → Yes, código 0**, sem processo restante. Cobertura e limites em [VALIDATION.md](docs/VALIDATION.md).
 
-### Retestar a 0.3
+### Executar a compilação local 0.4
 
-**Os binários desta sessão estão em `dist-v0.3\`, sem sobrescrever `dist-v0.2\`.** Essas pastas são saídas locais ignoradas pelo Git. Use launcher, DLL e INI da mesma versão e confirme `NativeResize=0` no INI ao lado da DLL. Feche outras instâncias de teste; o launcher recusa outra instância, inclusive oculta, e não encerra processos já existentes.
+A saída é **`dist-v0.4\`**, sem substituir `dist-v0.3\`. As pastas `dist*` são saídas locais ignoradas pelo Git. Mantenha launcher, DLL e INI da mesma versão; INIs existentes são preservados pelo build, não migrados automaticamente.
 
-Os comandos abaixo são para **o usuário executar o Lake real**, em ambiente de teste e sem áudio de produção:
-
-```powershell
-.\dist-v0.3\LakeWindowedLauncher.exe --app-dir "C:\Program Files (x86)\Lake\Lake Controller v5.8" --wait
-```
-
-Se continuar fechando, compare, em uma execução separada, somente as flags nativas, **sem DLL/host/hooks**:
+Com outras instâncias fechadas, primeiro em OFFLINE e fora de produção:
 
 ```powershell
-.\dist-v0.3\LakeWindowedLauncher.exe --app-dir "C:\Program Files (x86)\Lake\Lake Controller v5.8" --native-only --wait
+.\dist-v0.4\LakeWindowedLauncher.exe --app-dir "C:\Program Files (x86)\Lake\Lake Controller v5.8" --wait
 ```
 
-Mantenha o console aberto até o Lake terminar. O primeiro comando gera `dist-v0.3\logs\LakeWindowedFix-<PID>.log`; ambos podem gerar `logs\LakeWindowedFix-<PID>-exit.log` ao lado do launcher. O fallback, quando disponível, é `%TEMP%\LakeWindowedFix\`. O código final, mesmo zero, **não comprova correção gráfica**; uma exceção de primeira chance pode ser tratada pelo próprio aplicativo e não comprova crash. A comparação `--native-only` não isola sozinha a causa.
+Feche outras instâncias antes de testar; o launcher não as encerra. Se o processo continuar fechando, compare em uma execução separada somente as flags internas, **sem DLL/host/hooks**:
 
-Há **133 verificações PASS, zero falhas**, registradas nas três suítes sintéticas da 0.3 após as correções de diagnóstico. Elas não executam o Lake nem criam superfícies DirectDraw/Direct3D7. O reteste real da 0.3 permanece pendente; detalhes em [docs/VALIDATION.md](docs/VALIDATION.md).
+```powershell
+.\dist-v0.4\LakeWindowedLauncher.exe --app-dir "C:\Program Files (x86)\Lake\Lake Controller v5.8" --native-only --wait
+```
 
-### Histórico 0.1 → 0.2
+`--wait` aguarda o término sem timeout na observação normal, consulta `GetExitCodeProcess` e imprime/grava decimal e hexadecimal em `logs\LakeWindowedFix-<PID>-exit.log` ao lado do launcher. O log interno esperado é `logs\LakeWindowedFix-<PID>.log` ao lado da DLL; há fallback em `%TEMP%\LakeWindowedFix\` quando disponível. Código zero não prova correção visual; primeira chance não prova crash. A comparação nativa não isola sozinha uma causa e já apresentou imagem deslocada ao mover a janela no ensaio anterior.
 
-A 0.1 podia deixar a moldura oculta após a seleção de rede, mesmo com `WS_VISIBLE` no cliente. A 0.2 passou a replicar imediatamente o pedido nativo de exibição **sem rebuild nesse momento**, agendando o posicionamento/resize inicial após a notificação `0x8032`, com o loop externo como fallback. Esse resize inicial agora só existe com `NativeResize=1`. O relato de encerramento da 0.2 é distinto da falha de visibilidade da 0.1; os registros históricos estão preservados na documentação.
+### Histórico 0.1 → 0.3
+
+- **0.1/0.2:** a 0.1 podia manter o host oculto após escolher a rede. A 0.2 corrigiu a visibilidade, mas o usuário relatou depois o encerramento do PID histórico `14208` após `Native resize complete`/`host ready`. Sem código final, evento Aplicativo 1000/1001/1002 correspondente ou dump encontrado, crash versus saída normal permanece **indeterminado** ([R2](docs/ANALYSIS.md#r2--encerramento-após-o-setup-da-02-e-diagnóstico-na-03)).
+- **0.3:** tamanho fixo diagnóstico por padrão, `--wait` e observadores de saída; **133 PASS, zero falhas**, nas três suítes sintéticas, sem GPU. Preserva quit nativo pendente da UI sem usar quits de workers; os registros críticos usam try-lock de melhor esforço.
+- **Ensaio real autorizado da 0.3:** três execuções encerraram normalmente com exit 0. O modo fixo recortou a barra inferior em 125% DPI; o modo nativo sem host deslocou a imagem ao mover; o resize legado demorou cerca de cinco segundos e ainda cortou comandos da direita. Um ciclo de movimento, minimizar/restaurar e Alt+Tab funcionou no modo fixo, sem demonstrar estabilidade prolongada. Esses problemas motivam separar canvas e apresentação na 0.4 ([ANALYSIS.md](docs/ANALYSIS.md), R3). O aviso de 32 bits e uma primeira chance observada não impediram a continuação offline.
 
 **O executável e as DLLs originais não são alterados no disco.** Nenhum componente proprietário é distribuído. Este projeto não é oficial e não modifica licenças, firmware, rede ou processamento de áudio.
 
-> Ainda é necessária validação gráfica com o Lake real em cada GPU/driver e Windows. Nem o modo fixo diagnóstico nem os testes sintéticos Win32 demonstram que o travamento relatado foi eliminado. Não use inicialmente em um sistema de áudio de produção.
+> A validação real foi limitada ao ambiente documentado e a uma sessão vazia. Não é garantia universal de GPU/driver, perda de dispositivo, input ou áudio/rede. Não use inicialmente em áudio de produção.
 
 ## O que a análise encontrou
 
@@ -48,6 +51,7 @@ A 0.1 podia deixar a moldura oculta após a seleção de rede, mesmo com `WS_VIS
 - A janela gráfica normalmente recebe `WS_POPUP | WS_SYSMENU` (`0x80080000`). O `WM_SIZE` de `ContourParent` refaz superfícies e layout, com teardown global e caminhos de erro que exigem validação; não é uma operação comprovadamente segura.
 - Há um caminho nativo de `WM_DISPLAYCHANGE` que pode chamar `PostQuitMessage(0)` mesmo em windowed. Não há evidência de que tenha ocorrido no encerramento observado da 0.2.
 - O handler legado de foco tenta `SetFocus(main)` tanto ao ganhar quanto ao perder foco.
+- O aviso legado de 32 bits envolve `DDCKEYCAPS_SRCBLTCLRSPACE` (`0x400`), suporte a intervalo de color key em `Blt`, não uma capacidade genérica de renderizar em 32 bpp. A 0.4 não esconde o aviso nem falsifica `GetCaps`.
 
 Veja [docs/ANALYSIS.md](docs/ANALYSIS.md) para hashes, RVAs, evidências, limites e decisões técnicas.
 
@@ -56,19 +60,22 @@ Veja [docs/ANALYSIS.md](docs/ANALYSIS.md) para hashes, RVAs, evidências, limite
 1. O launcher verifica SHA-256 do EXE e de `Contour.dll`. Builds diferentes são recusados, sem opção de ignorar a verificação.
 2. Inicia uma **nova** instância com `windowed nonfullscreen`, diretório de trabalho correto e pausa antes do entry point do EXE. Um `INT3` transitório de um byte é colocado/restaurado **só na memória do filho**; nenhum byte do arquivo é alterado. As DLLs de importação inicial já foram inicializadas nesse momento.
 3. Carrega `LakeWindowedFix.dll` e chama sua inicialização **fora de `DllMain`/loader lock**. Só depois libera a thread principal. Não injeta em processos existentes.
-4. Redireciona imports IAT de `user32`/`kernel32` apenas no EXE e em `Contour.dll`; o hook de `LoadLibraryA/W` alcança o carregamento posterior da DLL gráfica. `GetProcAddress` cobre as APIs selecionadas resolvidas dinamicamente.
-5. Intercepta a criação da classe `Lake Controller` e cria um host com título/bordas, derivado de `WS_OVERLAPPEDWINDOW`, mas sem `WS_THICKFRAME`/`WS_MAXIMIZEBOX` no padrão fixo. A área gráfica vira `WS_CHILD`, sem `WS_POPUP`, preservando o renderer original.
-6. A visibilidade acompanha `ShowWindow`/`SetWindowPos(SHOWWINDOW)` do cliente. O setup inicial fica separado, após a notificação nativa `0x8032` ou o `GetMessage` externo como fallback. Com `NativeResize=0`, mantém o framebuffer original e não chama o rebuild pelo resize do host. Só com `NativeResize=1` reutiliza o resize de `ContourParent`, adiando o rebuild durante arraste até `WM_EXITSIZEMOVE` e filtrando tamanhos zero/minimizados. A imagem pode ficar recortada durante o arraste experimental.
+4. Redireciona IATs apenas no EXE e em `Contour.dll`, incluindo `DirectDrawCreateEx` no modo escalado; `LoadLibraryA/W` alcança o carregamento posterior de `Contour.dll` e `GetProcAddress` cobre os lookups selecionados.
+   O objeto retornado passa pelo proxy completo, sem modificar a vtable nativa. Além das IATs, há a escrita guardada das duas dimensões de layout por RVAs específicos do Build 007, após a seleção de modo; não é uma solução baseada somente em IAT/COM.
+5. No padrão escalado, cria a moldura privada redimensionável e o cliente `Lake Controller` como `WS_CHILD` com canvas fixo. A apresentação escala a fonte inteira para o viewport atual, preservando proporção, sem reconstruir o renderer para cada tamanho de janela.
+6. Mantém o pedido nativo de visibilidade e o setup agendado por `0x8032`/fallback do EXE. `HostSetupCompleted` continua sendo apenas setup da janela, não teste de saúde gráfica. O resize de `ContourParent` só volta no opt-in legado `NativeResize=1`, que desabilita escala.
 7. Impede a recuperação indevida de foco **apenas** quando `WM_KILLFOCUS` sai desse host. `WM_ACTIVATE` e `WM_ACTIVATEAPP` não são falsificados nem descartados globalmente.
 8. Neutraliza alterações `ChangeDisplaySettings[A/W/Ex]` vindas dos imports cobertos. Consultas `CDS_TEST` continuam reais.
 9. Encaminha o fechamento da moldura ao `WM_CLOSE` original do renderer, respeitando confirmação/recusa e cleanup nativos.
 10. Observa os caminhos de saída cobertos e exceções selecionadas sem impedir o comportamento original. Endereço/RVA só é atribuído ao EXE ou a `Contour.dll` quando estiver nas imagens cacheadas; não é uma captura universal de todas as saídas.
 
-**Por que não simplesmente `ddraw.dll` ou `d3d9.dll`?** Mudar só o estilo e retornar sucesso de `SetDisplayMode`/`SetCooperativeLevel` pode deixar um flip chain exclusivo inconsistente. Aqui o próprio caminho windowed do programa escolhe a criação de superfícies. Não há implementação parcial de COM nem proxy gráfico com exports incompletos.
+**Por que não simplesmente `ddraw.dll` ou `d3d9.dll`?** Mudar só estilos e inventar sucesso de `SetDisplayMode`/`SetCooperativeLevel` pode deixar recursos inconsistentes. O novo bridge usa proxies COM completos dentro de `LakeWindowedFix.dll`, não uma DLL gráfica para autoload. O backend continua sendo o Windows original. `Flip`, `BltFast`, fontes parciais e interfaces/caminhos não observados não se tornam automaticamente escalados.
 
 **Não basta copiar a DLL e abrir o EXE original.** A DLL tem nome próprio, não é carregada automaticamente. Use o launcher.
 
 ## Compilar do zero
+
+O build final x86 Zig passou nas seis suítes e no ensaio real descrito acima. MSVC/MinGW são alternativas documentadas, não toolchains executadas neste ambiente. Preserve a saída histórica 0.3.
 
 ### MSVC / Visual Studio 2022
 
@@ -77,10 +84,10 @@ Veja [docs/ANALYSIS.md](docs/ANALYSIS.md) para hashes, RVAs, evidências, limite
 3. Na raiz do projeto:
 
 ```powershell
-.\scripts\Build.ps1 -Toolchain MSVC -OutputDirectory dist-v0.3
+.\scripts\Build.ps1 -Toolchain MSVC -OutputDirectory dist-v0.4
 ```
 
-O script usa `-A Win32` e executa as três suítes sintéticas. `-OutputDirectory` funciona em todas as toolchains; os exemplos isolam a 0.3 em `dist-v0.3\` (sem o parâmetro, a saída padrão continua `dist\`). O CRT do MSVC é estático (`/MT`). Python e o software Lake **não são necessários para compilar ou rodar os testes**.
+O script usa `-A Win32`; a integração prevê quatro cenários Win32 mais testes separados ScaleGeometry e Presenter. `-OutputDirectory` funciona em todas as toolchains; os exemplos isolam a 0.4 em `dist-v0.4\` (sem o parâmetro, a saída padrão continua `dist\`). O CRT do MSVC é estático (`/MT`). Python e o software Lake **não são necessários para compilar ou rodar os testes sintéticos**.
 
 Equivalente CMake:
 
@@ -88,18 +95,18 @@ Equivalente CMake:
 cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A Win32
 cmake --build build-msvc --config Release --parallel
 ctest --test-dir build-msvc -C Release --output-on-failure
-cmake --install build-msvc --config Release --prefix dist-v0.3
-Copy-Item .\config\LakeWindowedFix.ini .\dist-v0.3\LakeWindowedFix.ini
+cmake --install build-msvc --config Release --prefix dist-v0.4
+Copy-Item .\config\LakeWindowedFix.ini .\dist-v0.4\LakeWindowedFix.ini
 ```
 
-O último comando manual substitui a configuração; o script de build a preserva. Em builds incrementais, confira explicitamente `NativeResize=0` antes do reteste: um INI anterior com valor 1 não é migrado automaticamente. Se sua política de scripts bloquear arquivos baixados, revise-os e desbloqueie apenas esses arquivos conforme a política local; não é necessário mudar a política global da máquina.
+O último comando manual substitui a configuração; o script de build a preserva. Confira `ScaleRendering=1`, `NativeResize=0` e as novas seções antes do reteste: um INI antigo não é migrado automaticamente. Se sua política de scripts bloquear arquivos baixados, revise-os e desbloqueie apenas esses arquivos conforme a política local; não é necessário mudar a política global da máquina.
 
 ### MinGW-w64 x86
 
 Com CMake, Ninja e compilador **i686** disponíveis no PATH:
 
 ```powershell
-.\scripts\Build.ps1 -Toolchain MinGW -MinGWCompiler i686-w64-mingw32-g++.exe -OutputDirectory dist-v0.3
+.\scripts\Build.ps1 -Toolchain MinGW -MinGWCompiler i686-w64-mingw32-g++.exe -OutputDirectory dist-v0.4
 ```
 
 Uma toolchain exclusivamente x64 não serve. Não misture DLL x64 com o processo Lake x86. Não instale DLLs deste projeto em `System32`/`SysWOW64`.
@@ -109,14 +116,14 @@ Uma toolchain exclusivamente x64 não serve. Não misture DLL x64 com o processo
 O script aceita Zig **0.14.1** já extraído; não faz downloads nem modifica PATH/configuração global:
 
 ```powershell
-.\scripts\Build.ps1 -Toolchain Zig -ZigPath C:\tools\zig\zig.exe -OutputDirectory dist-v0.3
+.\scripts\Build.ps1 -Toolchain Zig -ZigPath C:\tools\zig\zig.exe -OutputDirectory dist-v0.4
 ```
 
 Também é possível obter a distribuição Python desse compilador em uma pasta local ignorada, explicitamente:
 
 ```powershell
 python -m pip install --target .\build-tools\python ziglang==0.14.1
-.\scripts\Build.ps1 -Toolchain Zig -ZigPath .\build-tools\python\ziglang\zig.exe -OutputDirectory dist-v0.3
+.\scripts\Build.ps1 -Toolchain Zig -ZigPath .\build-tools\python\ziglang\zig.exe -OutputDirectory dist-v0.4
 ```
 
 Esse comando baixa uma toolchain de terceiros; é opcional. Consulte [docs/VALIDATION.md](docs/VALIDATION.md) para o que foi efetivamente compilado/testado.
@@ -124,15 +131,15 @@ Esse comando baixa uma toolchain de terceiros; é opcional. Consulte [docs/VALID
 ## Usar sem instalar (recomendado para o primeiro teste)
 
 1. Feche outras instâncias do Lake. Faça backup dos seus presets/configurações pelos mecanismos normais do software.
-2. Em um ambiente de teste, sem processadores de áudio em produção, execute:
+2. Com o build 0.4, em ambiente de teste sem processadores de áudio em produção, execute:
 
 ```powershell
-.\dist-v0.3\LakeWindowedLauncher.exe --app-dir "C:\Program Files (x86)\Lake\Lake Controller v5.8" --wait
+.\dist-v0.4\LakeWindowedLauncher.exe --app-dir "C:\Program Files (x86)\Lake\Lake Controller v5.8" --wait
 ```
 
-O launcher, a DLL e o INI permanecem em `dist-v0.3\`; não é necessário escrever na pasta do Lake. Eles devem ficar juntos. O próprio Lake ainda pode precisar das permissões e dependências originais da instalação.
+O launcher, a DLL e o INI devem permanecer juntos em `dist-v0.4\`; não é necessário escrever na pasta do Lake. O próprio Lake ainda pode precisar das permissões e dependências originais da instalação.
 
-3. No padrão fixo, confira título/bordas, movimento, Alt+Tab, minimizar/restaurar e eventual recorte seguindo [a matriz de teste](docs/VALIDATION.md). Resize/maximizar só fazem parte de uma execução experimental separada com `NativeResize=1`.
+3. Confira interface inteira, barra inferior/comandos da direita, movimento, resize/maximizar, mouse, Alt+Tab e minimizar/restaurar seguindo [a matriz](docs/VALIDATION.md). Não habilite `NativeResize=1` para obter resize no padrão novo: isso desliga a escala e volta ao rebuild legado.
 4. Para voltar ao comportamento original, feche o Lake e inicie `Lake Controller.exe` diretamente. Os hooks só existem no novo processo lançado pelo patch.
 
 ### Instalação opcional ao lado do EXE
@@ -153,7 +160,7 @@ Há também um instalador conservador que verifica hashes, recusa sobrescrever a
 .\scripts\Install.ps1 -AppDirectory "C:\Program Files (x86)\Lake\Lake Controller v5.8"
 ```
 
-Para instalar a compilação isolada nova, acrescente `-SourceDirectory dist-v0.3`. Não instale enquanto houver uma instância do Lake aberta.
+Depois de confirmar o build, para instalar a compilação isolada nova acrescente `-SourceDirectory dist-v0.4`. Os mesmos três nomes de arquivo são usados; não instale enquanto houver uma instância do Lake aberta.
 
 Escrever em `Program Files` normalmente exige PowerShell elevado. O script não se autoeleva. Para remover uma instalação feita por esse script:
 
@@ -170,20 +177,33 @@ Edite `LakeWindowedFix.ini` **ao lado da DLL**, não necessariamente na pasta do
 ```ini
 [window]
 Width=1024
-Height=768
+Height=576
 
 [compatibility]
+ScaleRendering=1
 NativeResize=0
+
+[render]
+Width=1088
+Height=612
 ```
 
-**Padrão diagnóstico (`NativeResize=0`):** preserva as dimensões originais do framebuffer; `Width`/`Height` não são aplicados. Não há resize interativo nem maximizar. A janela não é reduzida para caber no monitor e pode ultrapassar a área útil/ter recorte. Esse modo reduz a interferência do shim no renderer, mas não comprova estabilidade nem cumpre o objetivo de resize livre.
+| Modo | Flags | Comportamento |
+| --- | --- | --- |
+| Escalado, padrão 0.4 | `ScaleRendering=1`, `NativeResize=0` | Moldura redimensionável/maximizável; canvas fixo; sem rebuild nativo pelo resize do host |
+| Fixo diagnóstico, legado 0.3 | `ScaleRendering=0`, `NativeResize=0` | Framebuffer original; sem resize/maximizar; `[window]` não ajusta o tamanho; pode haver recorte |
+| Rebuild nativo, EXPERIMENTAL | `NativeResize=1` | Tem precedência e desabilita a escala; recria recursos e pode continuar cortando a UI |
 
-**Opt-in experimental (`NativeResize=1`):** habilita o rebuild legado, resize/maximizar e `Width`/`Height` como dimensões iniciais da área cliente. Mínimo: **800×600**. Valores inválidos voltam ao padrão; a janela tenta caber na área útil sem violar o mínimo. Desktops menores podem não comportar todas as bordas. Não há promessa de ausência de travamento, tela preta ou latência. Feche o Lake antes de mudar a configuração e teste fora de produção.
+No modo escalado, **`[window]` controla só a janela**: padrão 1024×576, mínimo interativo 320×180, tamanho inicial ajustado à área útil. São pixels lógicos, não dimensões físicas garantidas em DPI alto. Valores de configuração fora de 320–8192 na largura ou 180–8192 na altura voltam ao padrão correspondente.
+
+**`[render]` controla o canvas virtual fixo**: padrão **1088×612**, largura aceita **1024–4096**, altura **600–4096**. Fora dessas faixas, volta a 1088/612. Trocar o canvas exige fechar/reabrir o Lake; não é resize em tempo real. O presenter consulta a superfície fonte atual. Uma janela menor escala a interface inteira, mas não torna o texto legível em qualquer tamanho mínimo.
+
+Com `NativeResize=1`, o mínimo legado é 800×600; use, por exemplo, `[window] Width=1024` e `Height=768` para comparar. A altura 576 do INI novo não satisfaz esse mínimo e cai no fallback legado de 768. Não há promessa de ausência de travamento, tela preta, recorte ou latência. Feche o aplicativo antes de mudar o INI e teste cada modo separadamente, fora de produção.
 
 Para comparar somente as flags internas, **sem bordas/host/hooks**, há um diagnóstico:
 
 ```powershell
-.\dist-v0.3\LakeWindowedLauncher.exe --app-dir "C:\Program Files (x86)\Lake\Lake Controller v5.8" --native-only --wait
+.\dist-v0.4\LakeWindowedLauncher.exe --app-dir "C:\Program Files (x86)\Lake\Lake Controller v5.8" --native-only --wait
 # Ou, sem compilar:
 .\scripts\Start-NativeWindowed.ps1 -AppDirectory "C:\Program Files (x86)\Lake\Lake Controller v5.8"
 ```
@@ -193,7 +213,9 @@ Esses comandos executam o Lake real, incluindo seus comportamentos originais de 
 ## Limites e segurança operacional
 
 - Apenas os hashes documentados são aceitos. O nome “5.8” sozinho não garante equivalência de binários.
-- A DLL não implementa recuperação universal de `DDERR_SURFACELOST`, mudanças de monitor, RDP, hotplug ou de profundidade de cor. Elas precisam de teste; os avisos antigos de 16-bit podem continuar aparecendo.
+- O seed de layout escreve **dois `LONG` de dados em memória**, por RVAs do Build 007, após guardas; não é genérico para outros builds. Não virtualiza `GetDeviceCaps` nem altera código executável para dimensionar o layout. Foi observado no ensaio final com o canvas padrão.
+- A DLL não implementa recuperação universal de `DDERR_SURFACELOST`, mudanças de monitor, RDP, hotplug ou profundidade de cor. O aviso legado de 32 bits continua visível; HRESULTs DirectDraw não são convertidos em sucesso.
+- A escala e o mouse foram operados no Lake a 125% DPI, inclusive nos menus e diálogos citados. Windows 10, outros drivers, DPI misto, touch/IME, edição de texto e todos os demais controles não foram validados.
 - Sem patch global de User32/DirectDraw, serviço, driver, registro, AppInit_DLLs ou injeção em terceiros.
 - Hooks IAT de outros programas não são sobrescritos deliberadamente. Não combine inicialmente com DxWnd, overlays ou outros wrappers.
 - Chamadas por outros módulos, ordinais, delay imports e `LoadLibraryEx` não estão cobertas. O caminho observado usa imports normais e `LoadLibraryA`.
@@ -205,6 +227,8 @@ Esses comandos executam o Lake real, incluindo seus comportamentos originais de 
 
 ```text
 src/                    DLL, launcher, políticas Win32 e exports x86
+src/ddraw_scale.cpp     bridge de apresentação DD7 por objeto
+src/scale_geometry.h    viewport proporcional e coordenadas
 scripts/                build, instalação/remoção e inspeção offline
 tests/fixture.cpp       aplicativo sintético, sem código proprietário
 tests/Run-Fixture.ps1   cópias/configurações sintéticas isoladas por execução

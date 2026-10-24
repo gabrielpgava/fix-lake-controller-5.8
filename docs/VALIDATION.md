@@ -1,6 +1,6 @@
 # Validação e limites
 
-**Versão 0.3: experimental, tamanho fixo diagnóstico por padrão (`NativeResize=0`).** Os testes abaixo não validam o Lake real nem cumprem o objetivo de resize livre. O modo `NativeResize=1` é um opt-in experimental separado.
+**0.4 experimental, compilada e operada em OFFLINE.** O build final Zig passou em **648 verificações sintéticas, zero falhas**. A sessão final abriu a interface, executou menus/resize/foco e encerrou por Quit/Yes com código 0. Padrão: `ScaleRendering=1`, `NativeResize=0`, canvas **1088×612**, janela inicial **1024×576**. Isso não é validação universal ou de áudio em produção.
 
 ## Ambiente desta implementação
 
@@ -8,13 +8,43 @@
 - Toolchain disponível usada: Zig 0.14.1, target `x86-windows-gnu`, C++17.
 - Inspeção: Python 3.12.8, pefile 2024.8.26, Capstone 5.0.7.
 - MSVC/MinGW e Windows 10: instruções fornecidas; execução não observada neste ambiente.
-- O agente não executou os binários Lake. Na investigação da 0.1, houve consulta passiva às janelas de uma instância aberta pelo usuário, sem interagir com rede/hardware ou alterar/encerrar o processo. Depois o usuário executou a 0.2, que fechou após o setup, sem causa determinada. **A 0.3 ainda precisa de reteste real pelo usuário; funcionamento gráfico/áudio não foi validado.**
+- Na 0.1 houve consulta passiva; na 0.2, encerramento relatado pelo usuário sem causa determinada; na 0.3, ensaio real autorizado com limites explícitos. Na 0.4, candidatos intermediários foram reprovados e corrigidos antes do ensaio final. Áudio/hardware não foram operados.
 
 ## Testes automáticos
 
-Resultados registrados em 2026-10-24, sem executar o Lake:
+### 0.4 — seis suítes aprovadas
 
-### Atualização 0.3
+Log privado `private/build-validation-v04-reduced-02.txt`: **quatro cenários Win32** e **dois testes standalone**, sem warnings/falhas no build final. As contagens incluem verificações do launcher quando aplicável:
+
+Os testes COM falsos antigos não detectaram a rejeição de vtables nativas pelo Windows. Foram substituídos por testes de proxies próprios, identidade de `this`, todos os slots SDK, aliases/lifetime/concorrência e HRESULTs. As fixtures de mouse incluem HWND filho, hit-test virtual independente do alvo físico, Get/Peek A/W, `PM_NOREMOVE`, captura e wheel não consumido, sem mover o cursor global.
+
+| Cenário/teste | Configuração/objetivo | Estado 0.4 |
+| --- | --- | --- |
+| `windows_safe_no_rebuild` | Modo fixo diagnóstico | 65 PASS, 0 falhas |
+| `windows_experimental_resize` | Rebuild legado simulado | 63 PASS, 0 falhas |
+| `windows_exit_observer` | Saída intencional 23 e relatório/fallback | 5 PASS, 0 falhas |
+| `windows_scaled_window` / ScaledWindow | Host/canvas/mouse/lifecycle | 317 verificações + 4 do launcher; 0 falhas |
+| `scale_geometry` / ScaleGeometry | Proporção, coordenadas, deltas e limites aritméticos | 119 PASS, 0 falhas |
+| `scaled_presenter_objects` / Presenter | Proxies COM falsos completos, clipping/fallback e erros | 75 PASS, 0 falhas |
+
+O presenter verificou **30/49 slots SDK**, `this`/tabelas nativas intactos, QI cobertas, aliases nativos, offscreen real, unwrap, referências próprias, letterbox/clipper e propagação de erros. O fallback de letterbox é opcional: preenchido o host, retorna-se o HRESULT da apresentação real; se ambos os preenchimentos falharem, preserva-se a falha. COM falso **não exercita a GPU**.
+
+O probe DirectDraw real reproduziu a falha do clone e, com o proxy, registrou **QI D3D7 = 0, cooperação = 0, tabela nativa intacta e proxy distinto**. Um probe separado conferiu pixels da apresentação reduzida em três tamanhos de janela próprios. No Lake final, o seed foi alcançado e fonte/layout **1088×612** foram observados; veja R4 em `ANALYSIS.md`.
+
+A saída é **`dist-v0.4/`**, preservando `dist-v0.3/`. Para repetir os testes sintéticos:
+
+```powershell
+.\tests\Run-Fixture.ps1 -BinaryDirectory .\build-zig -NativeResize 0
+.\tests\Run-Fixture.ps1 -BinaryDirectory .\build-zig -NativeResize 1
+.\tests\Run-Fixture.ps1 -BinaryDirectory .\build-zig -NativeResize 0 -ExpectedExit 23
+.\tests\Run-Fixture.ps1 -BinaryDirectory .\build-zig -NativeResize 0 -ScaleRendering
+.\build-zig\LakeFixScaleGeometryTest.exe
+.\build-zig\LakeFixPresenterTest.exe
+```
+
+As três primeiras suítes optam explicitamente por `ScaleRendering=0`; a quarta usa canvas 1536×864 e janela inicial 1024×576. Cada execução Win32 usa sua própria cópia sintética/INI em `test-runs/<GUID>/` sob o build. O limite de tempo da fixture/CTest é separado do `--wait` de produção. O roteiro não substitui o probe nativo nem a matriz do Lake.
+
+### Histórico 0.3 — 133 PASS preservados
 
 Build Release x86 Zig concluído após as correções de diagnóstico; binários em **`dist-v0.3/`**, sem sobrescrever `dist-v0.2/`. O log local ignorado `private/build-validation-v03.txt` contém **133 verificações PASS, zero falhas**:
 
@@ -28,17 +58,9 @@ As contagens incluem verificações do launcher sintético. A saída 23 da fixtu
 
 Regressões finais: quit 23 postado no `WM_DESTROY` nativo permanece 23 após o cleanup do host; depois de consumido, não deixa estado obsoleto, e quit 99 de uma worker não impede o host da interface de postar zero. Um SRWLOCK próprio mantido por outra thread verifica que o helper de logging best-effort rejeita contenção em menos de 1000 ms; não força o lock privado da DLL nem testa toda espera possível de I/O. O launcher mantém um log local próprio aberto sem compartilhamento de escrita e confirma fallback em `%TEMP%`, código decimal/hex e conteúdo local preservados, sem alterar ACLs.
 
-Os logs das fixtures confirmaram **zero rebuilds** no modo fixo e **cinco pares begin/complete** no modo experimental. Esses pares só medem o procedimento sintético, não reconstruções gráficas reais.
+No histórico 0.3, os logs das fixtures confirmaram **zero rebuilds** no modo fixo e **cinco pares begin/complete** no experimental. Esses pares só medem o procedimento sintético, não reconstruções gráficas reais.
 
-`tests/Run-Fixture.ps1` cria uma pasta nova por execução sob o diretório de build (`build-zig/test-runs/<GUID>/` nesta toolchain), copia **apenas artefatos sintéticos** e escreve um INI próprio. Assim, as três suítes não sobrescrevem a configuração/DLL umas das outras nem usam a instalação real. O build as executa por padrão; os nomes CTest são `windows_safe_no_rebuild`, `windows_experimental_resize` e `windows_exit_observer`.
-
-Para repetir somente esses testes com os artefatos sintéticos já compilados:
-
-```powershell
-.\tests\Run-Fixture.ps1 -BinaryDirectory .\build-zig -NativeResize 0
-.\tests\Run-Fixture.ps1 -BinaryDirectory .\build-zig -NativeResize 1
-.\tests\Run-Fixture.ps1 -BinaryDirectory .\build-zig -NativeResize 0 -ExpectedExit 23
-```
+No registro 0.3, `tests/Run-Fixture.ps1` criou uma pasta por execução sob o build (`build-zig/test-runs/<GUID>/`), copiando **apenas artefatos sintéticos** e escrevendo um INI próprio. As três suítes não sobrescreveram a configuração/DLL umas das outras nem usaram a instalação real. Seus nomes CTest são `windows_safe_no_rebuild`, `windows_experimental_resize` e `windows_exit_observer`; foram reexecutadas como regressões na 0.4.
 
 O teste do observador de exceções chama **`RaiseException(EXCEPTION_ACCESS_VIOLATION, ...)` por software e trata explicitamente essa exceção** na fixture. Não faz um acesso inválido real à memória, não simula uma GPU com falha e não comprova recuperação de crash. Verifica que o diagnóstico de primeira chance é registrado e que o observador retorna `EXCEPTION_CONTINUE_SEARCH`, permitindo o tratamento original.
 
@@ -69,11 +91,11 @@ No reteste posterior feito **pelo usuário**, PID histórico `14208`, `dist-v0.2
 
 O log local da 0.1 está em `private/build-validation.txt` (ignorado); seus binários ficam em `dist/`. As pastas `dist*`, builds e relatórios locais não são conteúdo para publicação. Versione somente os arquivos públicos do projeto; não envie logs/dumps, relatórios privados integrais ou binários originais.
 
-### Cobertura comum e limites
+### Cobertura histórica e limites
 
 O build padrão compila uma aplicação Win32 inteiramente própria (`LakeFixFixture.exe`), uma **`Contour.dll` sintética** de teste e um launcher de teste (`LakeFixInjectionTest.exe`). O launcher de teste reutiliza o fonte de injeção de produção, mas só inicia o nome fixo da fixture. O launcher de produção mantém sua allowlist SHA-256 e não contém esse modo de teste. A DLL sintética não contém código Lake, nunca é instalada por este projeto e **não deve ser copiada para a instalação real**.
 
-Cobertura sintética, respeitando a política de resize selecionada:
+Cobertura sintética herdada da 0.3 e reexecutada na revisão final 0.4, respeitando a política selecionada:
 
 - ABI x86, injeção antes do entry point, export WINAPI sem decoração externa.
 - SHA-256 de vetor conhecido (`abc`) aceito e hash incorreto recusado.
@@ -92,41 +114,77 @@ Cobertura sintética, respeitando a política de resize selecionada:
 - Helper de try-lock sob contenção e fallback do relatório após falha de abertura local, sem alterar ACLs nem truncar logs existentes.
 - Carregamento tardio da DLL gráfica sintética, com imports interceptados antes de sua factory ser usada; erros de `LoadLibrary` preservados.
 
-Esses testes **não** criam superfícies DirectDraw/Direct3D7 nem exercitam GPU/driver ou o teardown/renderer proprietário identificado estaticamente. Não validam mouse/touch no Lake, dependências legadas, perda de dispositivo, latência de áudio ou correção do travamento/encerramento real. Preserve logs e estado final **localmente**, sem versioná-los; não tratar “compilou” ou “133 PASS” como “testado no Lake”.
+Esses testes **não** criam superfícies DirectDraw/Direct3D7 reais nem exercitam GPU/driver ou o teardown/renderer proprietário identificado estaticamente. Não validam mouse/touch no Lake, dependências legadas, perda de dispositivo, latência de áudio ou correção do travamento/encerramento real. Preserve logs e estado final **localmente**, sem versioná-los; não tratar “133 PASS” da 0.3 como aprovação da 0.4 ou da matriz real.
 
 O registro histórico da 0.1 inclui análise sintática dos scripts anteriores. Os instaladores não foram executados contra a pasta real protegida do Lake. MSVC, MinGW GCC e Windows 10 continuam sem execução observada neste ambiente.
 
-## Matriz gráfica/manual ainda pendente
+## Histórico real 0.3 — ensaio autorizado, não validação da 0.4
 
-Faça os testes em uma instalação licenciada, com presets/configuração de teste e sem processadores de áudio em produção. Registre versão/hash do shim, `NativeResize`, Windows 10 ou 11, GPU/driver, monitores e DPI. Não misture resultados do modo fixo com os de resize experimental.
+Fonte local privada: `private/runtime-20261024-02/REPORT.md`. Monitor 1920×1080, área útil 1920×1020, DPI 120/125%, processo DPI-unaware (0). A observação REA/Frida pode afetar timings; contagens de `Blt` cobrem somente o intervalo observado. O adaptador físico selecionado pelo renderer não foi estabelecido.
 
-### Primeiro: padrão diagnóstico `NativeResize=0`
+| Execução | Resultado limitado registrado |
+| --- | --- |
+| PID 6632, 0.3 fixa | Fonte 1536×863, cliente físico 1920×1078 e moldura 1928×1105: barra inferior cortada. Menus, um movimento, um minimizar/restaurar e um Alt+Tab/retorno funcionaram. 4.655 `Blt` primários com HRESULT 0; Quit/Yes, exit 0 |
+| PID 12380, nativo sem host | Após mover a (100,40) físicos, destino continuou em (0,0), com imagem deslocada. 1.687 `Blt` com HRESULT 0; Quit/Yes, exit 0 |
+| PID 13272, cópia 0.3 com resize legado | Renderer 1024×768/cliente físico 1280×960 cabível, mas comandos da direita cortados. Rebuild inicial 4.812 ms, ao restaurar 4.938 ms; X da moldura, exit 0 |
 
-Use o comando **0.3 com `--wait`** do README. Se continuar fechando, compare `--native-only --wait` em execução separada, sem hooks/host. Essa comparação também executa o Lake real e não determina sozinha a causa; guarde o código decimal/hexadecimal e os trechos relevantes dos logs localmente.
+As três saídas normais não corrigem o recorte nem demonstram estabilidade prolongada. A primeira tentativa interrompida por timeout da ferramenta foi excluída das conclusões. Não houve arraste contínuo, maximização ou matriz de tamanhos. O cache de startup não foi tratado como descrição atual da superfície.
+
+Uma AV de primeira chance em `D3D9on12.dll+0x78890` foi seguida de continuação do aplicativo, não classificada como crash. O aviso de 32 bits apareceu com/sem shim; a flag `0xc8a892=0` corresponde ao bit `DDCKEYCAPS_SRCBLTCLRSPACE` (`0x400`), não a capacidade genérica de 32 bpp. O usuário relatou rede/offline funcionando; o ensaio foi offline, sem conectar hardware, alterar adaptadores ou usar Save/Recall. Não é validação de áudio/rede.
+
+Hashes do EXE/`Contour.dll` originais e launcher/DLL/INI 0.3 permaneceram iguais. Logs/capturas/relatórios integrais ficam privados; imagens do seletor podem expor IPs e **não devem ser publicadas**. Mais detalhes e limites em [ANALYSIS.md, R3](ANALYSIS.md#r3--ensaio-real-autorizado-da-03-e-motivação-da-04).
+
+## Ensaio gráfico 0.4 operado pelo agente
+
+A sessão final, PID histórico **10148**, selecionou OFFLINE, confirmou o aviso de vídeo e escolheu **No**, sem recuperar/salvar presets ou configurar adaptadores/hardware. Encerrou por **Quit → Yes, exit 0**, sem instância restante. Monitor principal 1920×1080, área útil 1920×1020, DPI 120/125%, processo DPI-unaware. O adaptador gráfico físico não foi estabelecido.
+
+Foram analisadas capturas intermediárias: Modules, Home, cliente físico 800×600 e 600×450 com letterbox, maximizado 1920×991, arraste de borda de 600×450 para 520×410 e mínimo 400×225 físico (320×180 lógico), depois retorno a 1280×720. A interface completa foi preservada; no mínimo, o texto naturalmente fica muito pequeno. Wheel em área vazia, um ciclo minimizar/restaurar e um Alt+Tab/retorno foram operados. Houve ativação explícita da janela após Alt+Tab.
+
+A amostra REA/Frida final observou **9.315 Blts da primária com HRESULT 0**, **zero CreateSurface do DD7 acompanhado** e fonte/layout fixos **1088×612** durante movimento/resize/foco. Não cobre todas as chamadas gráficas. Resize mais resposta `WM_NULL` levou **0–46 ms** nos tamanhos registrados; não é benchmark de GPU/áudio. Nenhum rebuild `ContourParent` foi registrado na sessão final.
+
+Um candidato anterior mostrou `DDERR_EXCEPTION` no COLORFILL da primária: devolver essa falha sem apresentar a imagem congelava/cortava o conteúdo em proporções diferentes. O final usa fallback GDI restrito ao host; depois de ativado, a amostra não precisou de fills DirectDraw. Capturas/ações/logs e Evidence `ev_83a3b7397232f1bcdb19a83cfca29ad385a8adb457343f685d9c490cc32d65df` permanecem privados em `private/runtime-20261024-04/`.
+
+Um candidato foi encerrado forçadamente após perder a saída ao fechar um modal de startup; **não foi contado como saída normal**. O host final adia esse pedido de fechamento até concluir os diálogos; guarda e veto nativo foram testados sinteticamente. O Windows chegou a bloquear a sessão: cliques foram recusados e só continuaram após desbloqueio manual pelo usuário, sem contornar autenticação.
+
+### Padrão 0.4: `ScaleRendering=1`, `NativeResize=0`
+
+Os casos abaixo distinguem operações reais de ensaios prolongados/ambientes ainda pendentes. Código final e HRESULTs não substituem inspeção visual/input.
 
 | Caso | Resultado esperado | Estado |
 | --- | --- | --- |
-| Abrir pelo launcher, selecionar rede e permanecer aberto | Host com título/bordas, framebuffer original, sem rebuild inicial pelo shim; verificar renderização real | Pendente |
-| Mover entre posições do desktop | Janela se move; mouse permanece alinhado | Pendente |
-| Resize/maximizar no modo fixo | Controles desabilitados; tamanho original não é adaptado por `Width`/`Height` | Pendente no Lake real |
-| Janela maior que a área útil | Registrar recorte/acesso aos controles; não esperar ajuste automático do framebuffer | Pendente; limitação conhecida |
-| Alt+Tab 100 vezes | Outra janela recebe foco; volta sem travar | Pendente |
-| Minimizar/restaurar 50 vezes | Sem buffers 0×0; repaint e input normais | Pendente |
+| Interoperabilidade DirectDraw/D3D7 | QI/cooperação nativas preservadas | Probe nativo aprovado; clone descartado |
+| Abrir pelo launcher em sessão de teste | UI aberta e utilizável | Operado no ambiente acima |
+| Seed de layout após seleção nativa | Dimensões antes de construir a UI | Observado em 1088×612; corrupção de dados não forçada no proprietário |
+| Interface completa | Barra e comandos da direita visíveis | Verificado nas capturas citadas |
+| Mover entre posições do desktop | Destino/letterbox acompanham o host | Operado no monitor principal |
+| Resize até 320×180 lógico, 4:3/16:9 e maximizar/restaurar | Fonte fixa e conteúdo inteiro | Operado nos tamanhos citados |
+| Host maximizado maior que o canvas | Sem corte pelo HWND fixo | Verificado em 1920×991 físico versus canvas-HWND 1360×765 |
+| Arraste contínuo | Sem rebuild por pixel ou ao soltar | Um arraste real de borda, oito passos; não ensaio prolongado |
+| Mouse via Get/Peek A/W e dispatch | Hit-test virtual e coordenadas coerentes | Fixtures A/W aprovadas; menus/avisos/Home/Quit e wheel operados no Lake |
+| Par getter/setter do cursor | Conversão inversa apenas no par de retornos `0x36fc43`/`0x36fc55` armado por thread; demais setters inalterados | Pendente no Lake |
+| Controles filhos nativos de classes distintas | Verificar hit-testing, texto e foco separadamente, sem supor remapeamento universal | Menus/diálogos citados e fixture de filho operados; demais controles/texto pendentes |
+| Alt+Tab 100 vezes | Outra janela recebe foco; volta sem travar | 1 ciclo operado; 100 pendentes |
+| Minimizar/restaurar 50 vezes | Repaint/input normais e fonte fixa | 1 ciclo operado; 50 pendentes |
 | Botão interno “minimize” | Minimiza o host, não apenas o renderer filho | Pendente |
-| Diálogos de arquivos, avisos e texto | Modalidade, teclado e foco funcionam | Pendente |
+| Diálogos de arquivos, avisos e texto | Modalidade, teclado e foco funcionam | Aviso gráfico/No e confirmação de saída operados; arquivos/texto/teclado pendentes |
 | Touch, IME e acessibilidade | Sem regressões de input | Pendente |
-| 100%, 125%, 150%, 200% DPI | Coordenadas e bordas verificadas, não presumidas | Pendente |
+| 100%, 125%, 150%, 200% DPI | Medir lógicos/físicos e input | 125% operado; demais pendentes |
 | Vários monitores / DPI misto | Mover e restaurar; testar clipping | Pendente |
 | RDP, hotplug, bloqueio de sessão | Registrar perda/recuperação de superfícies | Pendente, sem garantia |
-| Fechar por X e pela UI interna | Threads encerram; sem processo órfão | Pendente |
-| Encerramento observado com `--wait` | Console e `LakeWindowedFix-<PID>-exit.log` registram código final; correlacionar mensagens sem presumir causa | Pendente no Lake real |
+| Fechar por X e pela UI interna | Sem processo órfão | Candidato reduzido fechou por X com exit 0; final por Quit/Yes, exit 0 |
+| Encerramento observado com `--wait` | Código final registrado | Confirmado na sessão final |
 | `WM_DISPLAYCHANGE`/mudança de ambiente | Mensagem segue para o original; registrar eventual saída nativa, sem bloqueá-la | Pendente, sem garantia |
-| Reabrir pelo EXE original | Comportamento original, hashes idênticos | Pendente |
-| Rede/áudio fora de produção | Descoberta/controle normal; sem alterações involuntárias | Pendente |
+| Falha DirectDraw/perda de superfície | Registrar HRESULT real e recuperação original, sem convertê-lo em sucesso ou esconder aviso | Pendente, sem garantia |
+| Reabrir pelo EXE original | Comportamento original, hashes idênticos | Reabertura não operada nesta rodada; hashes conferidos |
+| Rede/áudio com hardware | Fora deste roteiro offline; exige autorização e validação dedicadas, não inferidas do teste gráfico | Pendente, sem operação de hardware neste ensaio |
 
-### Depois, opcional: `NativeResize=1` EXPERIMENTAL
+### Comparações legadas separadas
 
-Feche o aplicativo antes de alterar o INI. Além de repetir a matriz essencial, registre separadamente:
+`ScaleRendering=0`, `NativeResize=0` mantém o diagnóstico fixo da 0.3, sem resize/maximizar; recorte pode reaparecer. Não é o padrão 0.4 nem uma alternativa comprovada ao objetivo de janela livre.
+
+**`NativeResize=1` desabilita escala e permanece EXPERIMENTAL.** Não é necessário para resize do host escalado. Feche o aplicativo antes de mudar o INI; use altura inicial de pelo menos 600 (por exemplo 768), pois os 576 do padrão novo caem no fallback legado.
+
+Se esse opt-in for comparado, registre separadamente:
 
 | Caso | Resultado a verificar | Estado |
 | --- | --- | --- |
@@ -134,10 +192,10 @@ Feche o aplicativo antes de alterar o INI. Além de repetir a matriz essencial, 
 | Resize até mínimo e maximizar/restaurar | UI/superfícies reconstruídas; sem tela preta, trava ou saída inesperada | Pendente |
 | Arraste contínuo de borda | Sem rebuild por pixel; redesenho após soltar e input alinhado | Pendente |
 
-O fato de `Native resize complete` aparecer não prova que HRESULTs e recursos nativos estejam válidos. Volte a `NativeResize=0` para a coleta diagnóstica inicial; não use o opt-in em áudio de produção.
+O fato de `Native resize complete` aparecer não prova que HRESULTs e recursos nativos estejam válidos nem que a UI inteira caiba. R3 já reproduziu corte e rebuild demorado nesse modo. Não use o opt-in em áudio de produção.
 
 Se o processo travar, capture evidência **com autorização** e guarde em `dumps/` ignorado. Não publique logs integrais, presets, dados de rede, dumps ou originais. Uma primeira chance pode ser tratada, e ausência de evento/dump não prova saída normal. Não faça firmware update nem altere adaptadores como parte de um teste gráfico.
 
 ## Critério para chamar a correção de validada
 
-Somente após a matriz essencial passar em **cada** combinação de SO/GPU/driver alegada, com o modo de configuração identificado. Aprovar o modo fixo permitiria apenas uma alegação limitada a esse modo; **não validaria o objetivo de resize livre**. Este exige também os testes de resize/maximizar com `NativeResize=1`. Até lá, ambos continuam **experimentais**, mesmo com todos os testes Win32 sintéticos aprovados.
+Uma alegação de suporte exige build/testes, interoperabilidade nativa e matriz essencial em **cada** SO/GPU/driver alegado: UI completa, seed no momento correto, clipper, movimento, resize/maximizar, input sem dupla escala, Alt+Tab, minimizar/restaurar, diálogos e saída. O objetivo 0.4 usa **escala ligada e rebuild nativo desligado**, sem depender de aprovar o opt-in legado. Exit 0 antes da UI é reprovação. COM falso/geometria, números intermediários ou os 133 PASS históricos não aprovam GPU, Windows 10, touch/IME, controles filhos ou áudio/rede ainda não testados. A 0.4 permanece **experimental, com validação limitada às operações e ao ambiente observados**, sem aprovação universal ou para áudio em produção.
