@@ -62,6 +62,8 @@ def inspect(selected_pid):
     user.GetWindowRect.argtypes = [w.HWND, c.POINTER(w.RECT)]
     user.IsWindowVisible.argtypes = [w.HWND]
     user.IsWindowEnabled.argtypes = [w.HWND]
+    user.GetPropW.argtypes = [w.HWND, w.LPCWSTR]
+    user.GetPropW.restype = w.HANDLE
     results = {pid: {"pid": pid, "main_windows": [], "other_top_level_classes": {}} for pid in targets}
 
     @callback_type
@@ -84,6 +86,7 @@ def inspect(selected_pid):
                 "visible": bool(user.IsWindowVisible(hwnd)),
                 "visible_style_bit": bool(style & 0x10000000),
                 "enabled": bool(user.IsWindowEnabled(hwnd)), "style": hex(style),
+                "host_setup_completed": bool(user.GetPropW(hwnd, "LakeWindowedFix.HostSetupCompleted")),
                 "parent": hex(user.GetParent(hwnd) or 0),
                 "rect": [rect.left, rect.top, rect.right, rect.bottom] if rectangle_available else None,
             })

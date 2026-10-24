@@ -4,7 +4,15 @@
 #include <commctrl.h>
 #include <cstring>
 #include <cwchar>
+#include <atomic>
 #include "policy.h"
+#include "log_lock.h"
+#ifdef _MSC_VER
+#include <intrin.h>
+#define LAKE_CALLER_ADDRESS() _ReturnAddress()
+#else
+#define LAKE_CALLER_ADDRESS() __builtin_return_address(0)
+#endif
 
 static_assert(sizeof(void*) == 4, "Build the compatibility DLL for x86");
 
@@ -15,6 +23,7 @@ HMODULE self;
 HMODULE application;
 HWND host;
 HWND client;
+SIZE originalClientSize;
 UINT readyMessage;
 UINT clientGoneMessage;
 bool sizing;
@@ -22,12 +31,20 @@ bool pendingSize;
 bool inResize;
 bool ready;
 bool readyQueued;
+bool nativeResizeEnabled;
 WPARAM pendingType;
 LPARAM pendingDimensions;
 LONG initialization;
 SRWLOCK importsLock = SRWLOCK_INIT;
 SRWLOCK logLock = SRWLOCK_INIT;
 HANDLE logFile = INVALID_HANDLE_VALUE;
+LONG observingException;
+ULONG_PTR applicationBytes;
+HMODULE renderer;
+ULONG_PTR rendererBytes;
+std::atomic<DWORD> uiThreadId{0};
+std::atomic<bool> nativeUiQuitPending{false};
+std::atomic<int> nativeUiQuitCode{0};
 constexpr UINT_PTR kSubclass = 0x4c574658;
 // Build 007's plugin vtable+0x24 posts this before ShowWindow(main, 1).
 constexpr UINT kNativeStartMessage = WM_APP + 0x32;
@@ -57,23 +74,88 @@ void InitializeLog() {
     }
 }
 
-void Log(const wchar_t* text) {
+void Log(const wchar_t* text, bool nonBlocking = false) {
     const DWORD error = GetLastError();
     wchar_t line[768]{};
-    swprintf_s(line, L"[LakeWindowedFix 0.2] tick=%llu pid=%lu tid=%lu %ls\r\n",
+    swprintf_s(line, L"[LakeWindowedFix 0.3] tick=%llu pid=%lu tid=%lu %ls\r\n",
                GetTickCount64(), GetCurrentProcessId(), GetCurrentThreadId(), text);
-    OutputDebugStringW(line);
+    // Exit/exception observers must not wait for a debugger notification.
+    if (!nonBlocking) OutputDebugStringW(line);
     if (logFile != INVALID_HANDLE_VALUE) {
         char encoded[3072]{};
         const int length = WideCharToMultiByte(CP_UTF8, 0, line, -1, encoded, sizeof(encoded), nullptr, nullptr);
         if (length > 1) {
-            AcquireSRWLockExclusive(&logLock);
-            DWORD written{};
-            WriteFile(logFile, encoded, static_cast<DWORD>(length - 1), &written, nullptr);
-            ReleaseSRWLockExclusive(&logLock);
+            const bool acquired = lakefix::AcquireDiagnosticLock(logLock, nonBlocking);
+            if (acquired) {
+                DWORD written{};
+                WriteFile(logFile, encoded, static_cast<DWORD>(length - 1), &written, nullptr);
+                ReleaseSRWLockExclusive(&logLock);
+            }
         }
     }
     SetLastError(error);
+}
+
+ULONG_PTR ImageBytes(HMODULE module) {
+    if (!module) return 0;
+    const auto* base = reinterpret_cast<const BYTE*>(module);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
+    return nt->OptionalHeader.SizeOfImage;
+}
+
+void LogSite(const wchar_t* event, DWORD code, const void* address, bool nonBlocking = false) {
+    const DWORD error = GetLastError();
+    const ULONG_PTR value = reinterpret_cast<ULONG_PTR>(address);
+    const ULONG_PTR appBase = reinterpret_cast<ULONG_PTR>(application);
+    const ULONG_PTR rendererBase = reinterpret_cast<ULONG_PTR>(renderer);
+    const wchar_t* name = L"outside-cached-target-images";
+    ULONG_PTR rva = 0;
+    if (application && value >= appBase && value - appBase < applicationBytes) {
+        name = L"main-executable";
+        rva = value - appBase;
+    } else if (renderer && value >= rendererBase && value - rendererBase < rendererBytes) {
+        name = L"Contour.dll";
+        rva = value - rendererBase;
+    }
+    wchar_t text[384]{};
+    swprintf_s(text, L"%ls code=%lu (0x%08lx) address=0x%08lx cached-image=%ls rva=0x%08lx",
+               event, code, code, static_cast<unsigned long>(value), name, static_cast<unsigned long>(rva));
+    Log(text, nonBlocking);
+    SetLastError(error);
+}
+
+LONG CALLBACK ObserveException(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+    const DWORD code = info->ExceptionRecord->ExceptionCode;
+    // First chance can be handled by the original app. Never swallow it, and
+    // don't try to allocate/log on an exhausted stack or on normal C++ throws.
+    if ((code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_ILLEGAL_INSTRUCTION ||
+         code == EXCEPTION_INT_DIVIDE_BY_ZERO) &&
+        InterlockedCompareExchange(&observingException, 1, 0) == 0) {
+        LogSite(L"First-chance exception (may be handled by application)", code,
+                info->ExceptionRecord->ExceptionAddress, true);
+        InterlockedExchange(&observingException, 0);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void LoadResizePolicy() {
+    wchar_t ini[1024]{};
+    const DWORD length = GetModuleFileNameW(self, ini, ARRAYSIZE(ini));
+    if (length && length < ARRAYSIZE(ini)) {
+        wchar_t* slash = wcsrchr(ini, L'\\');
+        if (slash && wcscpy_s(slash + 1, ARRAYSIZE(ini) - (slash + 1 - ini), L"LakeWindowedFix.ini") == 0)
+            nativeResizeEnabled = GetPrivateProfileIntW(L"compatibility", L"NativeResize", 0, ini) == 1;
+    }
+    Log(nativeResizeEnabled ? L"NativeResize=1: EXPERIMENTAL graphics teardown/rebuild enabled"
+                            : L"NativeResize=0: original framebuffer size retained; no native graphics rebuild");
+}
+
+DWORD FrameStyle(DWORD style) {
+    DWORD result = lakefix::HostStyle(style);
+    if (!nativeResizeEnabled) result &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    return result;
 }
 
 bool ClientRequestsVisibility() {
@@ -104,12 +186,21 @@ bool IsName(const wchar_t* name, const wchar_t* expected) {
 
 RECT OuterSize(int width, int height) {
     RECT r{0, 0, width, height};
-    AdjustWindowRectEx(&r, lakefix::HostStyle(0), FALSE, 0);
+    AdjustWindowRectEx(&r, FrameStyle(0), FALSE, 0);
     return r;
 }
 
 void InitialPlacement(HWND window) {
     Log(L"Initial placement begin");
+    if (!nativeResizeEnabled) {
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        if (GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor))
+            SetWindowPos(window, HWND_NOTOPMOST, monitor.rcWork.left, monitor.rcWork.top,
+                         0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        Log(L"Initial placement complete WITHOUT WM_SIZE or framebuffer size change");
+        return;
+    }
     wchar_t ini[32768]{};
     GetModuleFileNameW(self, ini, ARRAYSIZE(ini));
     wchar_t* slash = wcsrchr(ini, L'\\');
@@ -155,7 +246,10 @@ LRESULT CALLBACK HostProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
         if (!ready) {
             ready = true;
             InitialPlacement(window);
-            Log(L"Native windowed host ready");
+            if (window == host && IsWindow(window) && IsWindow(client)) {
+                SetPropW(window, L"LakeWindowedFix.HostSetupCompleted", reinterpret_cast<HANDLE>(1));
+                Log(L"Host setup complete (not a renderer health check)");
+            } else Log(L"Host/client destroyed during initial placement; setup not marked complete");
         }
         return 0;
     }
@@ -164,6 +258,12 @@ LRESULT CALLBACK HostProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
         return 0;
     }
     switch (message) {
+    case WM_SYSCOMMAND:
+        if (!nativeResizeEnabled && ((wparam & 0xfff0) == SC_SIZE || (wparam & 0xfff0) == SC_MAXIMIZE)) {
+            Log(L"Resize/maximize ignored while NativeResize=0");
+            return 0;
+        }
+        break;
     case WM_GETMINMAXINFO: {
         const RECT r = OuterSize(lakefix::kMinWidth, lakefix::kMinHeight);
         auto* limits = reinterpret_cast<MINMAXINFO*>(lparam);
@@ -177,7 +277,7 @@ LRESULT CALLBACK HostProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
         break;
     case WM_SIZE:
         // Keep zero/minimized buffers out of the native surface rebuild path.
-        if (!ready || !lakefix::HasPixels(wparam, lparam) || inResize) return 0;
+        if (!nativeResizeEnabled || !ready || !lakefix::HasPixels(wparam, lparam) || inResize) return 0;
         if (sizing) {
             pendingSize = true;
             pendingType = wparam;
@@ -206,15 +306,25 @@ LRESULT CALLBACK HostProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
         if (client) SetFocus(client);
         return 0;
     case WM_CLOSE:
+        Log(L"Host WM_CLOSE: forwarding to original client", true);
         // The real main WndProc owns confirmations/cleanup. A frame close must
         // not destroy its child behind its back or ignore an application veto.
         if (client) SendMessageW(client, WM_CLOSE, wparam, lparam);
         else DestroyWindow(window);
         return 0;
     case WM_DESTROY:
-        PostQuitMessage(0);
+        if (GetCurrentThreadId() == uiThreadId.load() && nativeUiQuitPending.load()) {
+            wchar_t text[160]{};
+            swprintf_s(text, L"Host WM_DESTROY: preserving pending native UI quit code=%d", nativeUiQuitCode.load());
+            Log(text, true);
+        } else {
+            Log(L"Host WM_DESTROY: no native UI quit pending; shim calls PostQuitMessage(0)", true);
+            PostQuitMessage(0);
+        }
         break;
     case WM_NCDESTROY:
+        Log(L"Host WM_NCDESTROY", true);
+        RemovePropW(window, L"LakeWindowedFix.HostSetupCompleted");
         RemoveWindowSubclass(window, HostProc, kSubclass);
         host = nullptr;
         ready = false;
@@ -228,6 +338,14 @@ LRESULT CALLBACK HostProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
 
 LRESULT CALLBACK ClientProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
                             UINT_PTR, DWORD_PTR) {
+    if (message == WM_CLOSE) Log(L"Client WM_CLOSE: original handler follows", true);
+    if (message == WM_DESTROY) Log(L"Client WM_DESTROY: original handler follows", true);
+    if (message == WM_DISPLAYCHANGE) {
+        wchar_t text[192]{};
+        swprintf_s(text, L"Client WM_DISPLAYCHANGE bits=%lu width=%u height=%u (forwarded unchanged)",
+                   static_cast<unsigned long>(wparam), LOWORD(lparam), HIWORD(lparam));
+        Log(text, true);
+    }
     if (message == readyMessage) {
         if (window == client && host) return SendMessageW(host, message, wparam, lparam);
         return 0;
@@ -254,6 +372,7 @@ LRESULT CALLBACK ClientProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         }
     }
     if (message == WM_NCDESTROY) {
+        Log(L"Client WM_NCDESTROY", true);
         RemoveWindowSubclass(window, ClientProc, kSubclass);
         client = nullptr;
         // Don't recursively destroy a parent while its child is in teardown.
@@ -270,11 +389,17 @@ HWND MakeHost(HINSTANCE instance, int width, int height) {
         SetLastError(ERROR_CLASS_DOES_NOT_EXIST);
         return nullptr;
     }
+    const DWORD current = GetCurrentThreadId();
+    if (uiThreadId.exchange(current) != current) {
+        nativeUiQuitPending.store(false);
+        nativeUiQuitCode.store(0);
+    }
     const RECT r = OuterSize(width > 0 ? width : 1024, height > 0 ? height : 768);
     // Hidden until the native client asks to be shown. Visibility and graphics
     // rebuild readiness are deliberately separate (the 0.1 regression).
-    host = CreateWindowExA(0, "ContourParent", "Lake Controller - Windowed",
-                           lakefix::HostStyle(0), CW_USEDEFAULT, CW_USEDEFAULT,
+    host = CreateWindowExA(0, "ContourParent", nativeResizeEnabled ? "Lake Controller - Windowed"
+                                                               : "Lake Controller - Windowed (diagnostic)",
+                           FrameStyle(0), CW_USEDEFAULT, CW_USEDEFAULT,
                            r.right - r.left, r.bottom - r.top,
                            nullptr, nullptr, instance, nullptr);
     if (!host) return nullptr;
@@ -288,8 +413,14 @@ HWND MakeHost(HINSTANCE instance, int width, int height) {
 
 bool AttachClient(HWND window) {
     if (!window || !SetWindowSubclass(window, ClientProc, kSubclass, 0)) return false;
+    RECT rectangle{};
+    if (!GetClientRect(window, &rectangle)) return false;
+    originalClientSize = {rectangle.right - rectangle.left, rectangle.bottom - rectangle.top};
     client = window;
     Log(L"Lake client hosted; native resize procedure retained");
+    wchar_t size[128]{};
+    swprintf_s(size, L"Original client size=%ldx%ld", originalClientSize.cx, originalClientSize.cy);
+    Log(size);
     return true;
 }
 
@@ -298,13 +429,66 @@ void QueueReadyAtMainLoop() {
     // paths run a plugin-owned loop before the EXE reaches GetMessage.
     QueueReady(L"Ready queued by EXE GetMessage fallback");
 }
+bool CalledFromApplication(const void* caller) {
+    const ULONG_PTR address = reinterpret_cast<ULONG_PTR>(caller);
+    const ULONG_PTR base = reinterpret_cast<ULONG_PTR>(application);
+    return application && address >= base && address - base < applicationBytes;
+}
+
+void ObserveQuitRemoval(const MSG* message) {
+    if (message && message->message == WM_QUIT && GetCurrentThreadId() == uiThreadId.load())
+        nativeUiQuitPending.store(false);
+}
+
 BOOL WINAPI HookMessageA(LPMSG message, HWND window, UINT first, UINT last) {
-    QueueReadyAtMainLoop();
-    return GetMessageA(message, window, first, last);
+    const void* caller = LAKE_CALLER_ADDRESS();
+    const bool fromApplication = CalledFromApplication(caller);
+    if (fromApplication) QueueReadyAtMainLoop();
+    const BOOL result = GetMessageA(message, window, first, last);
+    const DWORD error = GetLastError();
+    if (result == 0) {
+        ObserveQuitRemoval(message);
+        LogSite(fromApplication ? L"EXE GetMessageA returned WM_QUIT" : L"Module GetMessageA returned WM_QUIT",
+                message ? static_cast<DWORD>(message->wParam) : 0, caller, true);
+    } else if (result == -1) LogSite(L"GetMessageA failed", error, caller, true);
+    SetLastError(error);
+    return result;
 }
 BOOL WINAPI HookMessageW(LPMSG message, HWND window, UINT first, UINT last) {
-    QueueReadyAtMainLoop();
-    return GetMessageW(message, window, first, last);
+    const void* caller = LAKE_CALLER_ADDRESS();
+    const bool fromApplication = CalledFromApplication(caller);
+    if (fromApplication) QueueReadyAtMainLoop();
+    const BOOL result = GetMessageW(message, window, first, last);
+    const DWORD error = GetLastError();
+    if (result == 0) {
+        ObserveQuitRemoval(message);
+        LogSite(fromApplication ? L"EXE GetMessageW returned WM_QUIT" : L"Module GetMessageW returned WM_QUIT",
+                message ? static_cast<DWORD>(message->wParam) : 0, caller, true);
+    } else if (result == -1) LogSite(L"GetMessageW failed", error, caller, true);
+    SetLastError(error);
+    return result;
+}
+
+BOOL WINAPI HookPeekA(LPMSG message, HWND window, UINT first, UINT last, UINT flags) {
+    const BOOL result = PeekMessageA(message, window, first, last, flags);
+    const DWORD error = GetLastError();
+    if (result && (flags & PM_REMOVE) && message && message->message == WM_QUIT) {
+        ObserveQuitRemoval(message);
+        LogSite(L"PeekMessageA removed WM_QUIT", static_cast<DWORD>(message->wParam), LAKE_CALLER_ADDRESS(), true);
+    }
+    SetLastError(error);
+    return result;
+}
+
+BOOL WINAPI HookPeekW(LPMSG message, HWND window, UINT first, UINT last, UINT flags) {
+    const BOOL result = PeekMessageW(message, window, first, last, flags);
+    const DWORD error = GetLastError();
+    if (result && (flags & PM_REMOVE) && message && message->message == WM_QUIT) {
+        ObserveQuitRemoval(message);
+        LogSite(L"PeekMessageW removed WM_QUIT", static_cast<DWORD>(message->wParam), LAKE_CALLER_ADDRESS(), true);
+    }
+    SetLastError(error);
+    return result;
 }
 
 HWND WINAPI HookCreateA(DWORD ex, LPCSTR cls, LPCSTR title, DWORD style,
@@ -340,7 +524,7 @@ HWND WINAPI HookCreateW(DWORD ex, LPCWSTR cls, LPCWSTR title, DWORD style,
 LONG FilterLong(HWND window, int index, LONG value) {
     if (window == client || window == host) {
         if (index == GWL_STYLE) return static_cast<LONG>(window == host
-            ? lakefix::HostStyle(static_cast<DWORD>(value))
+            ? FrameStyle(static_cast<DWORD>(value))
             : lakefix::ClientStyle(static_cast<DWORD>(value)));
         if (index == GWL_EXSTYLE) return static_cast<LONG>(lakefix::WindowExStyle(static_cast<DWORD>(value)));
     }
@@ -360,9 +544,11 @@ BOOL WINAPI HookPosition(HWND window, HWND after, int x, int y, int w, int h, UI
         w = r.right;
         h = r.bottom;
         flags |= SWP_NOZORDER;
+        if (!nativeResizeEnabled) flags |= SWP_NOSIZE;
     } else if (window == host && after == HWND_TOPMOST) {
         after = HWND_NOTOPMOST;
     }
+    if (window == host && !nativeResizeEnabled) flags |= SWP_NOSIZE;
     const BOOL result = SetWindowPos(window, after, x, y, w, h, flags);
     const DWORD error = GetLastError();
     if (result && isClient && host) {
@@ -380,14 +566,18 @@ BOOL WINAPI HookMove(HWND window, int x, int y, int w, int h, BOOL paint) {
         RECT r{};
         GetClientRect(host, &r);
         x = y = 0;
-        w = r.right;
-        h = r.bottom;
+        w = nativeResizeEnabled ? r.right : originalClientSize.cx;
+        h = nativeResizeEnabled ? r.bottom : originalClientSize.cy;
+    } else if (window == host && !nativeResizeEnabled) {
+        RECT r{};
+        if (GetWindowRect(window, &r)) { w = r.right - r.left; h = r.bottom - r.top; }
     }
     return MoveWindow(window, x, y, w, h, paint);
 }
 
 BOOL WINAPI HookShow(HWND window, int command) {
     if (window != client || !host) return ShowWindow(window, command);
+    if (!nativeResizeEnabled && command == SW_MAXIMIZE) command = SW_SHOW;
     const bool hostCommand = command == SW_MINIMIZE || command == SW_SHOWMINIMIZED ||
         command == SW_SHOWMINNOACTIVE || command == SW_MAXIMIZE || command == SW_RESTORE ||
         command == SW_FORCEMINIMIZE;
@@ -404,6 +594,20 @@ BOOL WINAPI HookShow(HWND window, int command) {
     // 0x8032 notification or outer loop separately schedules initial placement.
     SetLastError(error);
     return previous;
+}
+
+void WINAPI HookQuit(int code) {
+    LogSite(L"Application PostQuitMessage", static_cast<DWORD>(code), LAKE_CALLER_ADDRESS(), true);
+    PostQuitMessage(code);
+    if (GetCurrentThreadId() == uiThreadId.load()) {
+        nativeUiQuitCode.store(code);
+        nativeUiQuitPending.store(true);
+    }
+}
+
+[[noreturn]] void WINAPI HookExit(UINT code) {
+    LogSite(L"Application ExitProcess", code, LAKE_CALLER_ADDRESS(), true);
+    ExitProcess(code);
 }
 
 // These APIs aren't in the observed normal imports; cover dynamic resolution
@@ -434,6 +638,7 @@ bool PatchModule(HMODULE module);
 HMODULE WINAPI HookLoadA(LPCSTR name) {
     HMODULE module = LoadLibraryA(name);
     const DWORD error = GetLastError();
+    if (module && module == GetModuleHandleW(L"Contour.dll")) { renderer = module; rendererBytes = ImageBytes(module); }
     if (module && module == GetModuleHandleW(L"Contour.dll") && !PatchModule(module)) {
         // Don't let the caller initialize a partially hooked graphics module.
         FreeLibrary(module);
@@ -447,6 +652,7 @@ HMODULE WINAPI HookLoadA(LPCSTR name) {
 HMODULE WINAPI HookLoadW(LPCWSTR name) {
     HMODULE module = LoadLibraryW(name);
     const DWORD error = GetLastError();
+    if (module && module == GetModuleHandleW(L"Contour.dll")) { renderer = module; rendererBytes = ImageBytes(module); }
     if (module && module == GetModuleHandleW(L"Contour.dll") && !PatchModule(module)) {
         FreeLibrary(module);
         SetLastError(ERROR_INVALID_FUNCTION);
@@ -476,6 +682,7 @@ Hook hooks[] = {
     HOOK("USER32.dll", "SetWindowPos", HookPosition),
     HOOK("USER32.dll", "MoveWindow", HookMove),
     HOOK("USER32.dll", "ShowWindow", HookShow),
+    HOOK("USER32.dll", "PostQuitMessage", HookQuit),
     HOOK("USER32.dll", "ChangeDisplaySettingsA", HookDisplayA),
     HOOK("USER32.dll", "ChangeDisplaySettingsW", HookDisplayW),
     HOOK("USER32.dll", "ChangeDisplaySettingsExA", HookDisplayExA),
@@ -483,8 +690,11 @@ Hook hooks[] = {
     HOOK("KERNEL32.dll", "LoadLibraryA", HookLoadA),
     HOOK("KERNEL32.dll", "LoadLibraryW", HookLoadW),
     HOOK("KERNEL32.dll", "GetProcAddress", HookGetProc),
-    {"USER32.dll", "GetMessageA", reinterpret_cast<PVOID>(HookMessageA), true, nullptr, nullptr},
-    {"USER32.dll", "GetMessageW", reinterpret_cast<PVOID>(HookMessageW), true, nullptr, nullptr},
+    HOOK("KERNEL32.dll", "ExitProcess", HookExit),
+    HOOK("USER32.dll", "GetMessageA", HookMessageA),
+    HOOK("USER32.dll", "GetMessageW", HookMessageW),
+    HOOK("USER32.dll", "PeekMessageA", HookPeekA),
+    HOOK("USER32.dll", "PeekMessageW", HookPeekW),
 };
 #undef HOOK
 
@@ -558,6 +768,12 @@ extern "C" DWORD WINAPI LakeWindowedInitialize(void*) {
     if (InterlockedCompareExchange(&initialization, 1, 0) != 0) return ERROR_ALREADY_INITIALIZED;
     InitializeLog();
     Log(L"Initialize begin");
+    LoadResizePolicy();
+    application = GetModuleHandleW(nullptr);
+    applicationBytes = ImageBytes(application);
+    renderer = GetModuleHandleW(L"Contour.dll");
+    rendererBytes = ImageBytes(renderer);
+    if (!AddVectoredExceptionHandler(1, ObserveException)) Log(L"Exception observer unavailable; exit status still available with --wait");
     readyMessage = RegisterWindowMessageW(L"LakeWindowedFix.Ready.v1");
     clientGoneMessage = RegisterWindowMessageW(L"LakeWindowedFix.ClientGone.v1");
     if (!readyMessage || !clientGoneMessage) return GetLastError();
@@ -574,7 +790,6 @@ extern "C" DWORD WINAPI LakeWindowedInitialize(void*) {
         hook.original = reinterpret_cast<PVOID>(GetProcAddress(hook.provider, hook.name));
         if (!hook.original) return ERROR_PROC_NOT_FOUND;
     }
-    application = GetModuleHandleW(nullptr);
     if (!PatchModule(application) || !PatchModule(GetModuleHandleW(L"Contour.dll")))
         return ERROR_INVALID_FUNCTION;
     // Imports point into this DLL until process exit. Unloading is unsupported.

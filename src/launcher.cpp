@@ -4,6 +4,7 @@
 #include <tlhelp32.h>
 #include <bcrypt.h>
 #include <cstdio>
+#include <cstring>
 #include <cwchar>
 #include <string>
 #include <vector>
@@ -50,6 +51,132 @@ bool FindRunningImage(const wchar_t* name, DWORD& pid) {
     } while (Process32NextW(snapshot.get(), &entry));
     return GetLastError() == ERROR_NO_MORE_FILES;
 }
+
+std::wstring TryWriteExitReport(const std::wstring& directory, DWORD pid, const char* line, DWORD length) {
+    if (!CreateDirectoryW(directory.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return {};
+    const std::wstring path = directory + L"\\LakeWindowedFix-" + std::to_wstring(pid) + L"-exit.log";
+    DWORD error = ERROR_SUCCESS;
+    {
+        // Append only: a failed/partial local write must never truncate an old log.
+        Handle file(CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (file.get() == INVALID_HANDLE_VALUE) return {};
+        DWORD written{};
+        if (!WriteFile(file.get(), line, length, &written, nullptr)) {
+            error = GetLastError();
+            if (!error) error = ERROR_WRITE_FAULT;
+        } else if (written != length) error = ERROR_WRITE_FAULT;
+    }
+    if (error != ERROR_SUCCESS) { SetLastError(error); return {}; }
+    return path;
+}
+
+std::wstring WriteExitReport(const std::wstring& patchDirectory, DWORD pid, DWORD code) {
+    char line[384]{};
+    const int length = snprintf(line, sizeof(line),
+        "pid=%lu tick=%llu code_decimal=%lu code_hex=0x%08lx\r\n"
+        "Observed process exit status only; code zero does not prove graphics correctness.\r\n",
+        pid, GetTickCount64(), code, code);
+    if (length <= 0 || static_cast<size_t>(length) >= sizeof(line)) {
+        SetLastError(ERROR_INVALID_DATA);
+        return {};
+    }
+    const std::wstring local = TryWriteExitReport(patchDirectory + L"\\logs", pid, line, static_cast<DWORD>(length));
+    if (!local.empty()) return local;
+    // An existing directory can still reject CreateFile/WriteFile. Retry the
+    // complete, unchanged record in TEMP after any local failure.
+    wchar_t temporary[1024]{};
+    const DWORD temporaryLength = GetTempPathW(ARRAYSIZE(temporary), temporary);
+    if (!temporaryLength) return {};
+    if (temporaryLength >= ARRAYSIZE(temporary)) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return {}; }
+    return TryWriteExitReport(std::wstring(temporary) + L"LakeWindowedFix", pid, line, static_cast<DWORD>(length));
+}
+
+#ifdef LAKE_FIX_TESTING
+bool CheckExitReport(const std::wstring& path, DWORD code, LONGLONG offset = 0) {
+    Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (file.get() == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER position{};
+    position.QuadPart = offset;
+    if (!SetFilePointerEx(file.get(), position, nullptr, FILE_BEGIN)) return false;
+    char text[4096]{};
+    DWORD bytes{};
+    if (!ReadFile(file.get(), text, sizeof(text) - 1, &bytes, nullptr)) return false;
+    char expected[64]{};
+    snprintf(expected, sizeof(expected), "code_decimal=%lu code_hex=0x%08lx", code, code);
+    return strstr(text, expected) != nullptr;
+}
+
+bool CheckExitReportFallback() {
+    wchar_t temporary[1024]{};
+    const DWORD length = GetTempPathW(ARRAYSIZE(temporary), temporary);
+    if (!length || length >= ARRAYSIZE(temporary)) return false;
+    const DWORD pid = GetCurrentProcessId();
+    const std::wstring name = L"\\LakeWindowedFix-" + std::to_wstring(pid) + L"-exit.log";
+    const std::wstring fallback = std::wstring(temporary) + L"LakeWindowedFix" + name;
+    LARGE_INTEGER before{};
+    {
+        // The fallback may predate this test. Check only the newly appended
+        // record, and never remove/truncate that shared-directory log.
+        Handle existing(CreateFileW(fallback.c_str(), GENERIC_READ,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (existing.get() != INVALID_HANDLE_VALUE) {
+            if (!GetFileSizeEx(existing.get(), &before)) return false;
+        } else {
+            const DWORD error = GetLastError();
+            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) return false;
+        }
+    }
+    const std::wstring prefix = std::wstring(temporary) + L"LakeWindowedFix-report-test-" +
+        std::to_wstring(pid) + L"-" + std::to_wstring(GetTickCount64()) + L"-";
+    std::wstring directory;
+    for (unsigned attempt = 0; attempt < 100; ++attempt) {
+        const std::wstring candidate = prefix + std::to_wstring(attempt);
+        if (CreateDirectoryW(candidate.c_str(), nullptr)) { directory = candidate; break; }
+        if (GetLastError() != ERROR_ALREADY_EXISTS) return false;
+    }
+    if (directory.empty()) return false;
+    const std::wstring logs = directory + L"\\logs";
+    const std::wstring local = logs + name;
+    const bool logsCreated = CreateDirectoryW(logs.c_str(), nullptr) != FALSE;
+    bool passed = false;
+    if (logsCreated) {
+        // CREATE_NEW proves ownership; DELETE_ON_CLOSE removes only this file.
+        // No FILE_SHARE_WRITE: the local directory exists, but append is denied.
+        Handle blocked(CreateFileW(local.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                   FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
+                                   FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr));
+        if (blocked.get() != INVALID_HANDLE_VALUE) {
+            constexpr char marker[] = "test-owned local log; preserve contents\r\n";
+            constexpr DWORD markerBytes = static_cast<DWORD>(sizeof(marker) - 1);
+            DWORD written{};
+            if (WriteFile(blocked.get(), marker, markerBytes, &written, nullptr) && written == markerBytes) {
+                // Formatting input only: no process is faulted or exited here.
+                constexpr DWORD code = 0x87654321;
+                const std::wstring report = WriteExitReport(directory, pid, code);
+                LARGE_INTEGER size{}, beginning{};
+                char unchanged[sizeof(marker)]{};
+                DWORD read{};
+                const bool preserved = GetFileSizeEx(blocked.get(), &size) && size.QuadPart == static_cast<LONGLONG>(markerBytes) &&
+                    SetFilePointerEx(blocked.get(), beginning, nullptr, FILE_BEGIN) &&
+                    ReadFile(blocked.get(), unchanged, markerBytes, &read, nullptr) &&
+                    read == markerBytes && memcmp(unchanged, marker, markerBytes) == 0;
+                passed = report == fallback && CheckExitReport(report, code, before.QuadPart) && preserved;
+            }
+        }
+    }
+    // Nonrecursive cleanup of directories created above; never touch fallback.
+    const bool logsRemoved = !logsCreated || RemoveDirectoryW(logs.c_str()) != FALSE;
+    const bool directoryRemoved = RemoveDirectoryW(directory.c_str()) != FALSE;
+    passed = passed && logsRemoved && directoryRemoved;
+    wprintf(L"%ls: fallback TEMP com log local sem compartilhamento de escrita; codigo decimal/hex preservado\n",
+            passed ? L"PASS" : L"FAIL");
+    if (!passed) SetLastError(ERROR_INVALID_DATA);
+    return passed;
+}
+#endif
 
 bool HashMatches(const std::wstring& path, const wchar_t* expected) {
     // Deny concurrent writers/deletion while calculating identity.
@@ -266,11 +393,24 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring patchDirectory = Parent(module);
     std::wstring directory = patchDirectory;
     bool nativeOnly = false;
+    bool waitForExit = false;
+#ifdef LAKE_FIX_TESTING
+    int fixtureExit = -1;
+#endif
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"--app-dir") == 0 && i + 1 < argc) directory = argv[++i];
         else if (wcscmp(argv[i], L"--native-only") == 0) nativeOnly = true;
+        else if (wcscmp(argv[i], L"--wait") == 0) waitForExit = true;
+#ifdef LAKE_FIX_TESTING
+        else if (wcscmp(argv[i], L"--fixture-exit") == 0 && i + 1 < argc) {
+            wchar_t* end{};
+            const unsigned long value = wcstoul(argv[++i], &end, 10);
+            if (!*argv[i] || *end || value > 255) return 2;
+            fixtureExit = static_cast<int>(value);
+        }
+#endif
         else {
-            fwprintf(stderr, L"Uso: LakeWindowedLauncher.exe [--app-dir PASTA] [--native-only]\n");
+            fwprintf(stderr, L"Uso: LakeWindowedLauncher.exe [--app-dir PASTA] [--native-only] [--wait]\n");
             return wcscmp(argv[i], L"--help") == 0 ? 0 : 2;
         }
     }
@@ -278,6 +418,7 @@ int wmain(int argc, wchar_t** argv) {
     if (directory.empty()) return Error(L"Pasta invalida");
 #ifdef LAKE_FIX_TESTING
     if (!CheckHashImplementation(patchDirectory)) return Error(L"Autoteste SHA-256 falhou");
+    if (!CheckExitReportFallback()) return Error(L"Autoteste de fallback do registro de saida falhou");
     DWORD selfPid{};
     const wchar_t* selfName = wcsrchr(module, L'\\');
     if (!FindRunningImage(selfName ? selfName + 1 : module, selfPid) || !selfPid)
@@ -302,6 +443,9 @@ int wmain(int argc, wchar_t** argv) {
     if (!nativeOnly && GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES)
         return Error(L"LakeWindowedFix.dll nao encontrada ao lado do launcher");
     std::wstring command = L"\"" + executable + L"\" windowed nonfullscreen";
+#ifdef LAKE_FIX_TESTING
+    if (fixtureExit >= 0) command += L" --exit-code " + std::to_wstring(fixtureExit);
+#endif
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -333,22 +477,45 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 #ifdef LAKE_FIX_TESTING
+    (void)waitForExit;
     if (WaitForSingleObject(process.hProcess, kTimeout) != WAIT_OBJECT_0) {
         TerminateProcess(process.hProcess, ERROR_TIMEOUT);
         WaitForSingleObject(process.hProcess, kTimeout);
         return Error(L"Fixture excedeu o limite");
     }
     DWORD result;
-    GetExitCodeProcess(process.hProcess, &result);
+    if (!GetExitCodeProcess(process.hProcess, &result)) return Error(L"GetExitCodeProcess falhou");
+    const std::wstring report = WriteExitReport(patchDirectory, process.dwProcessId, result);
+    const bool recorded = !report.empty() && CheckExitReport(report, result);
+    wprintf(L"%ls: arquivo registra codigo de saida decimal/hexadecimal\n", recorded ? L"PASS" : L"FAIL");
+    if (!recorded) return 1;
+    if (fixtureExit >= 0) {
+        const bool expected = result == static_cast<DWORD>(fixtureExit);
+        wprintf(L"%ls: saida nao-zero da fixture observada (%lu)\n", expected ? L"PASS" : L"FAIL", result);
+        return expected ? 0 : 1;
+    }
     return static_cast<int>(result);
 #else
     if (nativeOnly) wprintf(L"Processo criado (PID %lu), flags nativas sem hooks.\n", process.dwProcessId);
     else {
-        wprintf(L"Processo criado (PID %lu); DLL v0.2 inicializada. Isso ainda nao confirma que a janela principal abriu.\n",
+        wprintf(L"Processo criado (PID %lu); DLL v0.3 inicializada. Isso ainda nao confirma que a janela principal abriu.\n",
                 process.dwProcessId);
         wprintf(L"Log esperado: %ls\\logs\\LakeWindowedFix-%lu.log\n", patchDirectory.c_str(), process.dwProcessId);
     }
     wprintf(L"Arquivos originais nao alterados.\n");
+    if (waitForExit) {
+        wprintf(L"Aguardando o encerramento do Lake para registrar a saida. Feche o aplicativo normalmente ao terminar.\n");
+        fflush(stdout);
+        if (WaitForSingleObject(process.hProcess, INFINITE) != WAIT_OBJECT_0)
+            return Error(L"Espera pelo encerramento falhou");
+        DWORD result{};
+        if (!GetExitCodeProcess(process.hProcess, &result)) return Error(L"GetExitCodeProcess falhou");
+        wprintf(L"Lake encerrou: codigo %lu (0x%08lx).\n", result, result);
+        const std::wstring report = WriteExitReport(patchDirectory, process.dwProcessId, result);
+        if (!report.empty()) wprintf(L"Registro de saida: %ls\n", report.c_str());
+        else fwprintf(stderr, L"Nao foi possivel gravar o registro de saida (Win32=%lu).\n", GetLastError());
+        return static_cast<int>(result);
+    }
     return 0;
 #endif
 }

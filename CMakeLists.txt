@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(lake_controller_windowed_fix VERSION 0.2.0 LANGUAGES CXX)
+project(lake_controller_windowed_fix VERSION 0.3.0 LANGUAGES CXX)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     message(FATAL_ERROR "Windows x86 required. MSVC: -A Win32. MinGW: i686 toolchain.")
@@ -49,8 +49,17 @@ if(BUILD_TESTING)
     lake_warnings(FakeContour)
     lake_warnings(LakeFixFixture)
     lake_warnings(LakeFixInjectionTest)
-    add_test(NAME windows_injection_and_hooks COMMAND LakeFixInjectionTest)
-    set_tests_properties(windows_injection_and_hooks PROPERTIES TIMEOUT 30)
+    add_test(NAME windows_safe_no_rebuild COMMAND powershell.exe -NoProfile -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/Run-Fixture.ps1"
+        -BinaryDirectory "$<TARGET_FILE_DIR:LakeWindowedFix>" -NativeResize 0)
+    add_test(NAME windows_experimental_resize COMMAND powershell.exe -NoProfile -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/Run-Fixture.ps1"
+        -BinaryDirectory "$<TARGET_FILE_DIR:LakeWindowedFix>" -NativeResize 1)
+    add_test(NAME windows_exit_observer COMMAND powershell.exe -NoProfile -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/Run-Fixture.ps1"
+        -BinaryDirectory "$<TARGET_FILE_DIR:LakeWindowedFix>" -NativeResize 0 -ExpectedExit 23)
+    set_tests_properties(windows_safe_no_rebuild windows_experimental_resize windows_exit_observer
+        PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()
 
 install(TARGETS LakeWindowedFix LakeWindowedLauncher RUNTIME DESTINATION . LIBRARY DESTINATION .)

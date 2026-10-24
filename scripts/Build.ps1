@@ -36,7 +36,9 @@ if ($Toolchain -eq 'Zig') {
             '-o', (Join-Path $build 'LakeFixFixture.exe')))
         Invoke-Checked $zig ($common + @((Join-Path $root 'src/launcher.cpp'), '-DLAKE_FIX_TESTING',
             '-lbcrypt', '-municode', '-o', (Join-Path $build 'LakeFixInjectionTest.exe')))
-        Invoke-Checked (Join-Path $build 'LakeFixInjectionTest.exe') @('--app-dir', $build)
+        & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 0
+        & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 1
+        & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 0 -ExpectedExit 23
     }
     Copy-Item (Join-Path $build 'LakeWindowedFix.dll'), (Join-Path $build 'LakeWindowedLauncher.exe') $dist
 } else {
