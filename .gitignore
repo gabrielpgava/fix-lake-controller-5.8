@@ -1,0 +1,35 @@
+/build*/
+/out/
+/dist*/
+/private/
+/dumps/
+/evidence/
+*.exe
+*.dll
+*.lib
+*.exp
+*.obj
+*.o
+*.a
+*.pdb
+*.ilk
+*.idb
+*.i64
+*.dmp
+*.core
+*.log
+*.saz
+*.har
+__pycache__/
+*.py[cod]
+.vs/
+.idea/
+.vscode/
+CMakeUserPresets.json
+# Proprietary Lake artifacts, including renamed copies, are never inputs to Git.
+/original/
+/vendor/
+Lake Controller*
+Contour.*
+StdGraphics.*
+DaylightGraphics.*

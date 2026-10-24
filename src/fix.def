@@ -1,0 +1,3 @@
+LIBRARY LakeWindowedFix
+EXPORTS
+    LakeWindowedInitialize=LakeWindowedInitialize@4
