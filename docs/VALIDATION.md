@@ -1,5 +1,9 @@
 # Validação e limites
 
+## Revisão 0.5
+
+A validação das opções de fonte/cursor, as contagens atuais e a comparação isolada de 16/32 bits de cor estão em [UI-QUALITY.md](UI-QUALITY.md). Os resultados abaixo registram a **base 0.4 e seu histórico**, não substituem o reteste das opções novas. A 0.5 preserva as seis suítes anteriores e acrescenta `ui_quality_policy` / `LakeFixUiQualityTest.exe`.
+
 **0.4 experimental, compilada e operada em OFFLINE.** O build final Zig passou em **648 verificações sintéticas, zero falhas**. A sessão final abriu a interface, executou menus/resize/foco e encerrou por Quit/Yes com código 0. Padrão: `ScaleRendering=1`, `NativeResize=0`, canvas **1088×612**, janela inicial **1024×576**. Isso não é validação universal ou de áudio em produção.
 
 ## Ambiente desta implementação

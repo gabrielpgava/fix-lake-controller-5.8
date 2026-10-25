@@ -150,6 +150,16 @@ LRESULT CALLBACK ParentProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     return DefWindowProcA(window, message, wparam, lparam);
 }
 LRESULT NativeFixtureProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam, bool unicode) {
+    if (message == WM_CREATE) {
+        const auto* creation = reinterpret_cast<const CREATESTRUCTW*>(lparam);
+        if (creation->lpCreateParams) {
+            // The main HWND has not returned through AttachClient yet. Keep
+            // this control away from every existing synthetic hit-test point.
+            auto* initialChild = static_cast<HWND*>(creation->lpCreateParams);
+            *initialChild = CreateWindowExW(0, L"LakeFix.InputChild", L"", WS_CHILD | WS_VISIBLE,
+                                           1400, 820, 30, 20, window, nullptr, creation->hInstance, nullptr);
+        }
+    }
     if (message == WM_SIZE) ++nativeClientSizes;
     if (passWheelToDefault && (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL)) {
         // Bound a regression's recursion in the synthetic target only. The
@@ -187,6 +197,11 @@ LRESULT CALLBACK UnicodeLakeProc(HWND window, UINT message, WPARAM wparam, LPARA
     return NativeFixtureProc(window, message, wparam, lparam, true);
 }
 LRESULT CALLBACK InputChildProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_SETCURSOR) {
+        // Model the native button bar: never propagate this to main/host.
+        SetCursor(nullptr);
+        return TRUE;
+    }
     if (passWheelToDefault && (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL)) {
         if (++unhandledWheelMessages > 8) return 0;
     }
@@ -197,6 +212,20 @@ LRESULT CALLBACK InputChildProc(HWND window, UINT message, WPARAM wparam, LPARAM
     }
     return DefWindowProcW(window, message, wparam, lparam);
 }
+
+void CheckChildCursor(HWND window, const char* name) {
+    const HCURSOR previousCursor = GetCursor();
+    const HCURSOR arrow = LoadCursorW(nullptr, IDC_ARROW);
+    SetCursor(nullptr);
+    const LRESULT selected = window ? SendMessageW(window, WM_SETCURSOR, reinterpret_cast<WPARAM>(window),
+                                                  MAKELPARAM(HTCLIENT, WM_MOUSEMOVE)) : 0;
+    Check(window && selected && arrow && GetCursor() == arrow, name);
+    const LRESULT native = window ? SendMessageW(window, WM_SETCURSOR, reinterpret_cast<WPARAM>(window),
+                                                MAKELPARAM(HTLEFT, WM_MOUSEMOVE)) : 0;
+    Check(window && native && GetCursor() == nullptr, "child nonclient cursor request still reaches the native handler");
+    SetCursor(previousCursor); // Only cursor selection changes; no global movement.
+}
+
 void Pump() {
     MSG message;
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -337,14 +366,14 @@ void TestScaledMessagePoints(HWND renderer, HWND frame) {
               "captured GetCursorPos maps even outside image without moving real cursor");
     }
     const LPARAM coordinates = MAKELPARAM(100, 90);
-    WNDCLASSW childClass{};
-    childClass.hInstance = GetModuleHandleW(nullptr);
-    childClass.lpfnWndProc = InputChildProc;
-    childClass.lpszClassName = L"LakeFix.InputChild";
-    Check(RegisterClassW(&childClass) != 0, "register distinct native input-child class");
-    HWND inputChild = CreateWindowExW(0, childClass.lpszClassName, L"", WS_CHILD | WS_VISIBLE,
-                                      40, 50, 200, 100, renderer, nullptr, childClass.hInstance, nullptr);
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+    HWND inputChild = IsWindowUnicode(renderer)
+        ? CreateWindowExW(0, L"LakeFix.InputChild", L"", WS_CHILD | WS_VISIBLE,
+                          40, 50, 200, 100, renderer, nullptr, instance, nullptr)
+        : CreateWindowExA(0, "LakeFix.InputChild", "", WS_CHILD | WS_VISIBLE,
+                          40, 50, 200, 100, renderer, nullptr, instance, nullptr);
     Check(inputChild != nullptr, "create distinct child HWND inside virtual canvas");
+    CheckChildCursor(inputChild, "future A/W child selects OS arrow before its cursor-hiding native handler");
     for (int kind = 0; kind < (inputChild ? 8 : 4); ++kind) {
         const HWND target = kind < 4 ? renderer : inputChild;
         const LPARAM originalCoordinates = kind < 4 ? coordinates : MAKELPARAM(60, 40);
@@ -424,7 +453,6 @@ void TestScaledMessagePoints(HWND renderer, HWND frame) {
     wheelChild = nullptr;
     passWheelToDefault = false;
     if (inputChild) DestroyWindow(inputChild);
-    UnregisterClassW(childClass.lpszClassName, childClass.hInstance);
 }
 
 void ResizeScaledHost(HWND renderer, HWND frame, LONG width, LONG height, bool moveWindow,
@@ -462,12 +490,14 @@ void RunScaledWindowPath(HINSTANCE instance, bool unicode) {
     printf("Scaled %s creation/recreation path\n", unicode ? "Unicode" : "ANSI");
     // Deliberately request a different native size: [render], not the initial
     // CreateWindow dimensions or [window], owns the fixed renderer dimensions.
+    HWND initialChild = nullptr;
     lake = unicode ? CreateWindowExW(WS_EX_TOPMOST, L"Lake Controller", L"Unicode scaled fixture",
-                                     WS_POPUP | WS_SYSMENU, 0, 0, 1024, 768, nullptr, nullptr, instance, nullptr)
+                                     WS_POPUP | WS_SYSMENU, 0, 0, 1024, 768, nullptr, nullptr, instance, &initialChild)
                    : CreateWindowExA(WS_EX_TOPMOST, "Lake Controller", "ANSI scaled fixture",
-                                     WS_POPUP | WS_SYSMENU, 0, 0, 1024, 768, nullptr, nullptr, instance, nullptr);
+                                      WS_POPUP | WS_SYSMENU, 0, 0, 1024, 768, nullptr, nullptr, instance, &initialChild);
     Check(lake != nullptr, unicode ? "Unicode CreateWindowEx path creates renderer" : "ANSI CreateWindowEx path creates renderer");
     if (!lake) return;
+    Check(initialChild && GetParent(initialChild) == lake, "native child is created during main WM_CREATE before attachment");
     HWND frame = GetParent(lake);
     Check(frame != nullptr && frame != lake, "scaled renderer has a separate private host");
     if (!frame) {
@@ -513,6 +543,18 @@ void RunScaledWindowPath(HINSTANCE instance, bool unicode) {
     Pump();
     Check(startupNotifications == startupsBefore + 1 && GetPropW(frame, L"LakeWindowedFix.HostSetupCompleted"),
            "native 0x8032 and plugin-style Pump complete host readiness");
+    const HCURSOR previousCursor = GetCursor();
+    const HCURSOR arrow = LoadCursorW(nullptr, IDC_ARROW);
+    Check(SendMessageW(lake, WM_SETCURSOR, reinterpret_cast<WPARAM>(lake), MAKELPARAM(HTCLIENT, WM_MOUSEMOVE)) &&
+          arrow && GetCursor() == arrow, "scaled client selects the shared OS arrow without waiting for a rendered frame");
+    Check(SendMessageW(frame, WM_SETCURSOR, reinterpret_cast<WPARAM>(frame), MAKELPARAM(HTCLIENT, WM_MOUSEMOVE)) &&
+          GetCursor() == arrow, "scaled host client area selects the same OS arrow");
+    SetCursor(previousCursor); // Restore the test thread's prior cursor; never move the user's pointer.
+    CheckChildCursor(initialChild, "initial WM_CREATE child selects OS arrow before its cursor-hiding native handler");
+    SendMessageW(frame, WM_ACTIVATEAPP, FALSE, 0);
+    SendMessageW(frame, WM_ACTIVATEAPP, TRUE, 0);
+    Check(IsWindow(lake) && FixedScaledSource(lake, frame) && resizes == 0 && nativeParentMessages == 0,
+          "host deactivation/reactivation preserves canvas and native lifecycle");
     Check(closeRequests == earlyCloses + 1 && IsWindow(lake), "deferred startup close reaches native handler and respects veto once ready");
     vetoClose = false;
     RECT readyHost{};
@@ -571,8 +613,8 @@ void RunScaledWindowPath(HINSTANCE instance, bool unicode) {
     lastPumpedQuit = -1;
     SendMessageW(frame, WM_CLOSE, 0, 0);
     Pump();
-    Check(!IsWindow(lake) && !IsWindow(frame) && closeRequests == closesBefore + 2,
-          "scaled close runs native cleanup before destroying host");
+    Check(!IsWindow(lake) && !IsWindow(frame) && !IsWindow(initialChild) && closeRequests == closesBefore + 2,
+          "scaled close runs native cleanup before destroying host and cursor-subclassed child");
     Check(lastPumpedQuit == 23, "scaled cleanup preserves native WM_DESTROY quit code 23");
     // Bounded cleanup of this test's own windows if a close assertion failed.
     if (IsWindow(lake)) DestroyWindow(lake);
@@ -587,7 +629,44 @@ int RunScaledFixture(const wchar_t* configuration) {
     Check(sizeof(void*) == 4, "x86 scaled fixture");
     Check(GetPrivateProfileIntW(L"render", L"Width", 0, configuration) == 1536 &&
           GetPrivateProfileIntW(L"render", L"Height", 0, configuration) == 864, "scaled suite has independent render configuration");
+    HMODULE fontModule = LoadLibraryW(L"Contour.dll");
+    Check(fontModule != nullptr, "load synthetic renderer for module-scoped font hook");
+    if (fontModule) {
+        FARPROC address = GetProcAddress(fontModule, "FixtureCreateFont");
+        if (!address) address = GetProcAddress(fontModule, "_FixtureCreateFont");
+        Check(address != nullptr, "synthetic font factory exported");
+        if (address) {
+            using Factory = HFONT (__cdecl*)(const LOGFONTA*);
+            const auto factory = reinterpret_cast<Factory>(reinterpret_cast<void*>(address));
+            LOGFONTA request{}, observed{};
+            request.lfHeight = -13;
+            request.lfWeight = FW_NORMAL;
+            request.lfQuality = NONANTIALIASED_QUALITY;
+            strcpy_s(request.lfFaceName, "Arial");
+            const LOGFONTA original = request;
+            HFONT font = factory(&request);
+            Check(font && GetObjectA(font, sizeof(observed), &observed) == sizeof(observed) &&
+                  observed.lfQuality == ANTIALIASED_QUALITY && observed.lfHeight == request.lfHeight &&
+                  observed.lfWeight == request.lfWeight, "renderer font factory receives grayscale AA with requested size/weight intact");
+            Check(memcmp(&request, &original, sizeof(request)) == 0, "font hook never writes caller LOGFONT storage");
+            if (font) DeleteObject(font);
+            font = CreateFontIndirectA(&request);
+            Check(font && GetObjectA(font, sizeof(observed), &observed) == sizeof(observed) &&
+                  observed.lfQuality == NONANTIALIASED_QUALITY, "font calls outside renderer retain original quality");
+            if (font) DeleteObject(font);
+            strcpy_s(request.lfFaceName, "Small Fonts");
+            font = factory(&request);
+            Check(font && GetObjectA(font, sizeof(observed), &observed) == sizeof(observed) &&
+                  observed.lfQuality == NONANTIALIASED_QUALITY, "raster/LCD faces are not silently replaced");
+            if (font) DeleteObject(font);
+        }
+    }
     HINSTANCE instance = GetModuleHandleW(nullptr);
+    WNDCLASSW childClass{};
+    childClass.hInstance = instance;
+    childClass.lpfnWndProc = InputChildProc;
+    childClass.lpszClassName = L"LakeFix.InputChild";
+    Check(RegisterClassW(&childClass) != 0, "register distinct native input-child class once for both creation paths");
     WNDCLASSEXA ansi{};
     ansi.cbSize = sizeof(ansi);
     ansi.hInstance = instance;
@@ -616,6 +695,8 @@ int RunScaledFixture(const wchar_t* configuration) {
     }
     Check(nativeParentMessages == 0 && resizes == 0, "scaled suite never enters native parent procedure");
     UnregisterClassA("ContourParent", instance);
+    UnregisterClassW(childClass.lpszClassName, childClass.hInstance);
+    if (fontModule) FreeLibrary(fontModule);
     printf("%d check(s), %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;
 }

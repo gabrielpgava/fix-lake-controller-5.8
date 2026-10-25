@@ -32,13 +32,16 @@ if ($Toolchain -eq 'Zig') {
     if (!$SkipTests) {
         Invoke-Checked $zig ($common + @((Join-Path $root 'tests/scale_geometry_test.cpp'),
             '-municode', '-o', (Join-Path $build 'LakeFixScaleGeometryTest.exe')))
+        Invoke-Checked $zig ($common + @((Join-Path $root 'tests/ui_quality_test.cpp'),
+            '-municode', '-o', (Join-Path $build 'LakeFixUiQualityTest.exe')))
         Invoke-Checked $zig ($common + @((Join-Path $root 'tests/presenter_test.cpp'), (Join-Path $root 'src/ddraw_scale.cpp'),
             '-luser32', '-municode', '-o', (Join-Path $build 'LakeFixPresenterTest.exe')))
         Invoke-Checked (Join-Path $build 'LakeFixScaleGeometryTest.exe') @()
+        Invoke-Checked (Join-Path $build 'LakeFixUiQualityTest.exe') @()
         Invoke-Checked (Join-Path $build 'LakeFixPresenterTest.exe') @()
         Invoke-Checked $zig ($common + @('-shared', (Join-Path $root 'tests/renderer_fixture.cpp'),
-            '-luser32', '-o', (Join-Path $build 'Contour.dll')))
-        Invoke-Checked $zig ($common + @((Join-Path $root 'tests/fixture.cpp'), '-luser32', '-municode',
+            '-luser32', '-lgdi32', '-o', (Join-Path $build 'Contour.dll')))
+        Invoke-Checked $zig ($common + @((Join-Path $root 'tests/fixture.cpp'), '-luser32', '-lgdi32', '-municode',
             '-o', (Join-Path $build 'LakeFixFixture.exe')))
         Invoke-Checked $zig ($common + @((Join-Path $root 'src/launcher.cpp'), '-DLAKE_FIX_TESTING',
             '-lbcrypt', '-municode', '-o', (Join-Path $build 'LakeFixInjectionTest.exe')))

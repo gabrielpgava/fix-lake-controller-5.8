@@ -9,6 +9,7 @@
 #include "log_lock.h"
 #include "scale_geometry.h"
 #include "ddraw_scale.h"
+#include "ui_quality.h"
 #ifdef _MSC_VER
 #include <intrin.h>
 #define LAKE_CALLER_ADDRESS() _ReturnAddress()
@@ -41,6 +42,11 @@ SIZE renderSize{1088, 612};
 SIZE initialViewSize{1024, 576};
 bool canvasLayoutSeeded;
 bool closeAfterStartup;
+bool smoothFontsEnabled = true;
+bool systemCursorEnabled = true;
+HCURSOR systemArrow;
+bool smoothFontLogged;
+bool systemCursorLogged;
 std::atomic<DWORD> presentationSize{0};
 WPARAM pendingType;
 LPARAM pendingDimensions;
@@ -56,6 +62,7 @@ std::atomic<DWORD> uiThreadId{0};
 std::atomic<bool> nativeUiQuitPending{false};
 std::atomic<int> nativeUiQuitCode{0};
 constexpr UINT_PTR kSubclass = 0x4c574658;
+constexpr UINT_PTR kChildCursorSubclass = 0x4c574643;
 // Build 007's plugin vtable+0x24 posts this before ShowWindow(main, 1).
 constexpr UINT kNativeStartMessage = WM_APP + 0x32;
 constexpr char kScaledHostClass[] = "LakeWindowedFix.ScaledHost.v1";
@@ -90,7 +97,7 @@ void InitializeLog() {
 void Log(const wchar_t* text, bool nonBlocking = false) {
     const DWORD error = GetLastError();
     wchar_t line[768]{};
-    swprintf_s(line, L"[LakeWindowedFix 0.4] tick=%llu pid=%lu tid=%lu %ls\r\n",
+    swprintf_s(line, L"[LakeWindowedFix 0.5] tick=%llu pid=%lu tid=%lu %ls\r\n",
                GetTickCount64(), GetCurrentProcessId(), GetCurrentThreadId(), text);
     // Exit/exception observers must not wait for a debugger notification.
     if (!nonBlocking) OutputDebugStringW(line);
@@ -166,6 +173,8 @@ void LoadResizePolicy() {
             initialViewSize.cy = GetPrivateProfileIntW(L"window", L"Height", 576, ini);
             renderSize.cx = GetPrivateProfileIntW(L"render", L"Width", 1088, ini);
             renderSize.cy = GetPrivateProfileIntW(L"render", L"Height", 612, ini);
+            smoothFontsEnabled = GetPrivateProfileIntW(L"render", L"SmoothFonts", 1, ini) == 1;
+            systemCursorEnabled = GetPrivateProfileIntW(L"input", L"SystemCursor", 1, ini) == 1;
         }
     }
     // Missing INI uses the new safe scaling mode, not native resource rebuild.
@@ -311,6 +320,144 @@ bool RendererCallsite(const void* caller, ULONG_PTR rva) {
     return renderer && reinterpret_cast<ULONG_PTR>(caller) == reinterpret_cast<ULONG_PTR>(renderer) + rva;
 }
 
+bool RendererAddress(const void* caller) {
+    const ULONG_PTR address = reinterpret_cast<ULONG_PTR>(caller);
+    const ULONG_PTR base = reinterpret_cast<ULONG_PTR>(renderer);
+    return renderer && address >= base && address - base < rendererBytes;
+}
+
+bool UseSystemCursor() { return scaleRenderingEnabled && systemCursorEnabled && systemArrow; }
+
+// ShowCursor uses a thread/input-queue counter, not a visibility Boolean. Lake
+// starts with a negative count. Own only bounded compensating increments, then
+// return those increments on exit/focus loss; never normalize an unrelated app.
+thread_local unsigned cursorVisibilityCredits;
+thread_local lakefix::VirtualCursorVisibility virtualCursorVisibility;
+
+int WINAPI HookShowCursor(BOOL show) {
+    const void* caller = LAKE_CALLER_ADDRESS();
+    const DWORD saved = GetLastError();
+    const ULONG_PTR rva = RendererAddress(caller)
+        ? reinterpret_cast<ULONG_PTR>(caller) - reinterpret_cast<ULONG_PTR>(renderer) : 0;
+    if (!lakefix::ShouldVirtualizeCursorVisibility(UseSystemCursor(), client != nullptr,
+                                                  GetCurrentThreadId() == uiThreadId.load(), rva)) {
+        SetLastError(saved);
+        return ShowCursor(show); // Preserve the real API's result and LastError.
+    }
+    // Intentional virtualization of four legacy cursor-hide return sites, not
+    // an HRESULT or a claim about OS visibility. Every other call stays native.
+    // Our own DLL's IAT is never patched, so the one-time balanced probe cannot
+    // recurse into this hook; it also leaves our compensating credits intact.
+    const int result = virtualCursorVisibility.Adjust(show, cursorVisibilityCredits,
+        [](BOOL visible) noexcept { return ShowCursor(visible); });
+    SetLastError(saved);
+    return result;
+}
+
+void RestoreCursorVisibility() {
+    lakefix::ReleaseCursorVisibility(cursorVisibilityCredits, [](BOOL show) noexcept { return ShowCursor(show); });
+}
+
+void EnsureCursorVisible() {
+    CURSORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetCursorInfo(&info) || (info.flags & CURSOR_SHOWING)) return;
+    lakefix::AcquireCursorVisibility(cursorVisibilityCredits, [](BOOL show) noexcept { return ShowCursor(show); });
+}
+
+LRESULT CALLBACK ChildCursorProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
+                                 UINT_PTR, DWORD_PTR) {
+    if (message == WM_SETCURSOR && LOWORD(lparam) == HTCLIENT && UseSystemCursor() &&
+        client && IsChild(client, window)) {
+        // Some native controls consume this message and hide the OS cursor
+        // before it can reach main. Leave all input and coordinates native.
+        SetCursor(systemArrow);
+        EnsureCursorVisible();
+        return TRUE;
+    }
+    if (message == WM_NCDESTROY)
+        RemoveWindowSubclass(window, ChildCursorProc, kChildCursorSubclass);
+    return DefSubclassProc(window, message, wparam, lparam);
+}
+
+void AttachChildCursor(HWND window) {
+    if (!UseSystemCursor() || !client || !window || !IsChild(client, window)) return;
+    DWORD process{};
+    const DWORD thread = GetWindowThreadProcessId(window, &process);
+    if (thread != GetCurrentThreadId() || thread != uiThreadId.load() || process != GetCurrentProcessId()) {
+        Log(L"SystemCursor: child outside owning UI thread/process; native cursor/bitmap fallback retained", true);
+        return;
+    }
+    if (!SetWindowSubclass(window, ChildCursorProc, kChildCursorSubclass, 0))
+        Log(L"SystemCursor: child cursor subclass unavailable; native cursor/bitmap fallback retained", true);
+}
+
+BOOL CALLBACK AttachExistingChildCursor(HWND window, LPARAM) {
+    AttachChildCursor(window);
+    return TRUE;
+}
+
+bool CursorOverHost() {
+    POINT point{};
+    if (!host || IsIconic(host) || !GetCursorPos(&point)) return false;
+    const HWND under = WindowFromPoint(point);
+    return under && GetAncestor(under, GA_ROOT) == host;
+}
+
+bool CursorInsideHostClient() {
+    POINT point{};
+    if (!host || !client || IsIconic(host) || !GetCursorPos(&point)) return false;
+    const HWND under = WindowFromPoint(point);
+    if (under == client || IsChild(client, under)) return true;
+    if (under != host) return false;
+    RECT area{};
+    return ScreenToClient(host, &point) && GetClientRect(host, &area) && PtInRect(&area, point);
+}
+
+int WINAPI HookMapWindowPoints(HWND from, HWND to, LPPOINT points, UINT count) {
+    const void* caller = LAKE_CALLER_ADDRESS();
+    const int result = MapWindowPoints(from, to, points, count);
+    const DWORD saved = GetLastError();
+    if (UseSystemCursor() && from == nullptr && to == client && count == 2 && points &&
+        RendererAddress(caller) && lakefix::IsCursorPaintReturn(
+            reinterpret_cast<ULONG_PTR>(caller) - reinterpret_cast<ULONG_PTR>(renderer))) {
+        // Outside this host, leave the other application's cursor alone and
+        // suppress Lake's stale bitmap. Inside, suppress only after confirming
+        // a visible OS cursor. Hidden-count/modal cases retain the legacy sprite.
+        const bool overHost = CursorOverHost();
+        if (!overHost) RestoreCursorVisibility();
+        bool suppress = !CursorInsideHostClient();
+        if (!suppress) {
+            SetCursor(systemArrow);
+            EnsureCursorVisible();
+            CURSORINFO info{};
+            info.cbSize = sizeof(info);
+            suppress = GetCursorInfo(&info) && (info.flags & CURSOR_SHOWING) && info.hCursor == systemArrow;
+        }
+        if (suppress && lakefix::HideSoftwareCursorRectangle(points, count) && !systemCursorLogged) {
+            systemCursorLogged = true;
+            Log(L"SystemCursor=1: OS arrow independent of presentation; verified legacy cursor paint rectangles clipped", true);
+        }
+    }
+    SetLastError(saved);
+    return result;
+}
+
+HFONT WINAPI HookCreateFontIndirectA(const LOGFONTA* input) {
+    const void* caller = LAKE_CALLER_ADDRESS();
+    LOGFONTA smooth{};
+    const bool changed = input && scaleRenderingEnabled && smoothFontsEnabled && RendererAddress(caller) &&
+        lakefix::PrepareSmoothFont(*input, smooth);
+    const HFONT result = CreateFontIndirectA(changed ? &smooth : input);
+    const DWORD saved = GetLastError();
+    if (result && changed && !smoothFontLogged) {
+        smoothFontLogged = true;
+        Log(L"SmoothFonts=1: grayscale antialiasing for native Arial/Courier New; requested size/face retained", true);
+    }
+    SetLastError(saved);
+    return result;
+}
+
 struct CursorRoundTrip {
     bool armed = false;
     HWND window = nullptr;
@@ -414,7 +561,7 @@ void MapMessagePoint(MSG* message) {
     POINT mapped{};
     // Contour's private loop also consumes MSG.pt directly.
     // Main lParam is mapped at dispatch; native child local lParam was mapped
-    // above, since native child WndProcs are deliberately not subclassed.
+    // above, since native child cursor subclasses never rewrite mouse input.
     if (MapScreenPoint(message->pt, mapped)) message->pt = mapped;
 }
 
@@ -528,6 +675,14 @@ void InitialPlacement(HWND window) {
 
 LRESULT CALLBACK HostProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
                           UINT_PTR, DWORD_PTR) {
+    if (UseSystemCursor() && message == WM_SETCURSOR) {
+        EnsureCursorVisible();
+        if (LOWORD(lparam) == HTCLIENT) {
+            SetCursor(systemArrow);
+            return TRUE;
+        }
+        // Nonclient sizing/moving cursors remain DefWindowProc's responsibility.
+    }
     const bool wheel = message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL;
     // DefWindowProc propagates an unconsumed wheel from the child to its
     // parent. Never bounce that delivery back to the child or scale it twice.
@@ -555,6 +710,11 @@ LRESULT CALLBACK HostProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
         return 0;
     }
     switch (message) {
+    case WM_ACTIVATEAPP:
+        // The focused HWND may be a native descendant rather than main. The
+        // top-level deactivation covers that case without swallowing activation.
+        if (!wparam) RestoreCursorVisibility();
+        break;
     case WM_ERASEBKGND:
         // The presenter owns the image and letterbox (including its GDI fill
         // fallback). Do not erase them during host WM_PAINT/resize.
@@ -634,6 +794,7 @@ LRESULT CALLBACK HostProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
         }
         break;
     case WM_NCDESTROY:
+        RestoreCursorVisibility();
         Log(L"Host WM_NCDESTROY", true);
         RemovePropW(window, L"LakeWindowedFix.HostSetupCompleted");
         RemoveWindowSubclass(window, HostProc, kSubclass);
@@ -650,6 +811,11 @@ LRESULT CALLBACK HostProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
 
 LRESULT CALLBACK ClientProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
                             UINT_PTR, DWORD_PTR) {
+    if (UseSystemCursor() && message == WM_SETCURSOR && LOWORD(lparam) == HTCLIENT) {
+        EnsureCursorVisible();
+        SetCursor(systemArrow);
+        return TRUE;
+    }
     if (scaleRenderingEnabled && deliveringClientWheel && (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL)) {
         // A native child can propagate an unconsumed, already-scaled wheel
         // back to main. Continue default propagation, never re-enter its router.
@@ -704,6 +870,7 @@ LRESULT CALLBACK ClientProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     }
     if (message == WM_KILLFOCUS && reinterpret_cast<HWND>(wparam) != host &&
         !IsChild(host, reinterpret_cast<HWND>(wparam))) {
+        RestoreCursorVisibility();
         // The observed legacy handler calls SetFocus(main) on BOTH SETFOCUS and
         // KILLFOCUS. Don't bounce focus back when it actually left this host.
         return IsWindowUnicode(window) ? DefWindowProcW(window, message, wparam, lparam)
@@ -717,6 +884,7 @@ LRESULT CALLBACK ClientProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         }
     }
     if (message == WM_NCDESTROY) {
+        RestoreCursorVisibility();
         Log(L"Client WM_NCDESTROY", true);
         RemoveWindowSubclass(window, ClientProc, kSubclass);
         client = nullptr;
@@ -815,6 +983,9 @@ bool AttachClient(HWND window) {
     presentationSize.store(0);
     canvasLayoutSeeded = false;
     client = window;
+    // WM_CREATE can build the native controls before client is assigned. The
+    // enumeration includes nested descendants, without touching owned dialogs.
+    if (UseSystemCursor()) EnumChildWindows(window, AttachExistingChildCursor, 0);
     Log(scaleRenderingEnabled ? L"Lake client hosted on fixed virtual canvas; no native resize procedure used"
                               : L"Lake client hosted; native resize procedure retained");
     wchar_t size[128]{};
@@ -897,8 +1068,13 @@ BOOL WINAPI HookPeekW(LPMSG message, HWND window, UINT first, UINT last, UINT fl
 HWND WINAPI HookCreateA(DWORD ex, LPCSTR cls, LPCSTR title, DWORD style,
                        int x, int y, int w, int h, HWND parent, HMENU menu,
                        HINSTANCE instance, LPVOID param) {
-    if (parent || (style & WS_CHILD) || !IsName(cls, "Lake Controller"))
-        return CreateWindowExA(ex, cls, title, style, x, y, w, h, parent, menu, instance, param);
+    if (parent || (style & WS_CHILD) || !IsName(cls, "Lake Controller")) {
+        const HWND window = CreateWindowExA(ex, cls, title, style, x, y, w, h, parent, menu, instance, param);
+        const DWORD error = GetLastError();
+        AttachChildCursor(window);
+        SetLastError(error);
+        return window;
+    }
     if (scaleRenderingEnabled) { w = renderSize.cx; h = renderSize.cy; }
     HWND frame = MakeHost(instance, w, h);
     if (!frame) return nullptr;
@@ -913,8 +1089,13 @@ HWND WINAPI HookCreateA(DWORD ex, LPCSTR cls, LPCSTR title, DWORD style,
 HWND WINAPI HookCreateW(DWORD ex, LPCWSTR cls, LPCWSTR title, DWORD style,
                        int x, int y, int w, int h, HWND parent, HMENU menu,
                        HINSTANCE instance, LPVOID param) {
-    if (parent || (style & WS_CHILD) || !IsName(cls, L"Lake Controller"))
-        return CreateWindowExW(ex, cls, title, style, x, y, w, h, parent, menu, instance, param);
+    if (parent || (style & WS_CHILD) || !IsName(cls, L"Lake Controller")) {
+        const HWND window = CreateWindowExW(ex, cls, title, style, x, y, w, h, parent, menu, instance, param);
+        const DWORD error = GetLastError();
+        AttachChildCursor(window);
+        SetLastError(error);
+        return window;
+    }
     if (scaleRenderingEnabled) { w = renderSize.cx; h = renderSize.cy; }
     HWND frame = MakeHost(instance, w, h);
     if (!frame) return nullptr;
@@ -1087,9 +1268,12 @@ Hook hooks[] = {
     HOOK("USER32.dll", "SetWindowPos", HookPosition),
     HOOK("USER32.dll", "MoveWindow", HookMove),
     HOOK("USER32.dll", "ShowWindow", HookShow),
+    HOOK("USER32.dll", "ShowCursor", HookShowCursor),
     HOOK("USER32.dll", "GetCursorPos", HookCursorPosition),
     HOOK("USER32.dll", "SetCursorPos", HookSetCursorPosition),
     HOOK("USER32.dll", "GetClientRect", HookClientRectangle),
+    HOOK("USER32.dll", "MapWindowPoints", HookMapWindowPoints),
+    HOOK("GDI32.dll", "CreateFontIndirectA", HookCreateFontIndirectA),
     HOOK("USER32.dll", "PostQuitMessage", HookQuit),
     HOOK("USER32.dll", "ChangeDisplaySettingsA", HookDisplayA),
     HOOK("USER32.dll", "ChangeDisplaySettingsW", HookDisplayW),
@@ -1183,6 +1367,10 @@ extern "C" DWORD WINAPI LakeWindowedInitialize(void*) {
     InitializeLog();
     Log(L"Initialize begin");
     LoadResizePolicy();
+    if (scaleRenderingEnabled && systemCursorEnabled) {
+        systemArrow = LoadCursorW(nullptr, IDC_ARROW);
+        if (!systemArrow) Log(L"SystemCursor unavailable: shared Windows arrow could not be loaded; legacy cursor retained", true);
+    }
     lakefix::ConfigureScalePresenter(ScaledViewport, PresenterLog, ClipWindow, PaintLetterbox);
     application = GetModuleHandleW(nullptr);
     applicationBytes = ImageBytes(application);

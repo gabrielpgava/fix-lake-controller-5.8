@@ -1,5 +1,13 @@
 # Diagnóstico
 
+## 0.5: texto e movimento do cursor
+
+A revisão 0.5 usa `dist-v0.5\` e acrescenta `[render] SmoothFonts=1` e `[input] SystemCursor=1`, somente no modo escalado. O texto recebe antialiasing na origem, não blur geral; o cursor passa a ser a seta do Windows, independente da cadência do renderer. Para comparar com o comportamento anterior, use `SmoothFonts=0` / `SystemCursor=0` com o Lake fechado. Fontes bitmap e formas especializadas do cursor têm limites explícitos em [UI-QUALITY.md](UI-QUALITY.md).
+
+Não reduza a cor global do Windows para esconder o aviso de 32 bits: o teste isolado em 16 bpp realmente mudou as superfícies para RGB565, mas apresentou corrupção de texto/botões, sem ganho demonstrado no intervalo entre frames. Essa mensagem verifica uma capacidade específica de color-key, não a causa comprovada de lentidão. A arquitetura do processo continua x86 em ambos os modos de cor.
+
+Se a seta desaparecer depois de usar toque/caneta, distinga os flags de `GetCursorInfo`: **0** é oculto, **1** é visível e **2** é `CURSOR_SUPPRESSED`, supressão pelo próprio Windows. Na retomada, um evento de movimento de mouse restabeleceu a seta, sem alterar o patch; apenas reposicionar com `SetCursorPos` não fez isso. Não normalize `ShowCursor` indefinidamente nem altere a configuração global de input como contorno. O bitmap pode reaparecer como fallback enquanto a seta não está visível. Houve também duas amostras ocultas transitórias no primeiro percurso após resize; limites e resultados completos em [UI-QUALITY.md](UI-QUALITY.md).
+
 ## 0.4: janela escalada e canvas menor
 
 O build final foi operado em **OFFLINE no Windows 11, a 125% DPI**, com menus, resize, maximizar/restaurar, minimizar/restaurar e Alt+Tab. Passou em **648 verificações sintéticas, zero falhas**. Isso não garante estabilidade em outros drivers/DPI, Windows 10 ou áudio em produção; cobertura e pendências em [VALIDATION.md](VALIDATION.md).
@@ -123,7 +131,7 @@ O estágio da falha e o código Win32 aparecem no console. Em falha de inicializ
 - Abra `LakeWindowedLauncher.exe`, não `Lake Controller.exe`.
 - Não use `--native-only` se espera a moldura do shim; ele serve apenas para comparação diagnóstica.
 - Não copie a DLL como `ddraw.dll`, `user32.dll` ou `d3d9.dll`.
-- Depois do build, confira `[LakeWindowedFix 0.4]`, `Initialized`, `client hosted`, política `ScaleRendering=1` e `Host setup complete`. Setup concluído não significa renderer saudável. `OutputDebugString` não contém todos os registros críticos de melhor esforço.
+- Depois do build, confira o prefixo da versão executada (`[LakeWindowedFix 0.5]` na revisão atual), `Initialized`, `client hosted`, política `ScaleRendering=1` e `Host setup complete`. Setup concluído não significa renderer saudável. `OutputDebugString` não contém todos os registros críticos de melhor esforço.
 - O patch não corrige uma janela criada por outro módulo/classe desconhecido. Informe hash e contexto, não envie o EXE.
 
 ## Sem resize/maximizar ou configuração aparentemente ignorada

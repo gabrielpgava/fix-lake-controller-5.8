@@ -1,5 +1,7 @@
 # Análise estática e decisões técnicas
 
+**Revisão 0.5:** tratamento de fonte/cursor e ensaio de RGB565 estão em [UI-QUALITY.md](UI-QUALITY.md). Esta página conserva a análise e os resultados históricos que fundamentam a base 0.4.
+
 Data: 2026-10-24. **0.4 experimental, compilada e operada em OFFLINE no Windows 11 a 125% DPI:** 648 verificações sintéticas aprovadas e ensaio real de menus/resize/foco, com canvas reduzido a 1088×612. R4 registra os candidatos reprovados e as correções finais; isso não valida outros ambientes nem áudio em produção. R1 registra observação passiva da 0.1; R2, o encerramento da 0.2; R3, o ensaio real da 0.3. Endereços VA usam a base preferida do PE, não endereços garantidos em runtime. `Contour.dll`: base `0x10000000`, máquina `0x014c` (x86).
 
 ## Identidade

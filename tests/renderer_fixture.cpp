@@ -31,3 +31,7 @@ extern "C" __declspec(dllexport) void __cdecl FixturePump(HWND window) {
         DispatchMessageA(&message);
     }
 }
+
+extern "C" __declspec(dllexport) HFONT __cdecl FixtureCreateFont(const LOGFONTA* font) {
+    return CreateFontIndirectA(font);
+}
