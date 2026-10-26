@@ -1,5 +1,11 @@
 # Diagnóstico
 
+## 0.6: mínimo configurável e recursos
+
+A candidata 0.6 usa `dist-v0.6\` e acrescenta `[window] MinWidth=800` / `MinHeight=450` no modo escalado. São mínimos em pixels lógicos; `320/180` restaura o limite pequeno anterior. A 125% DPI, o padrão resultou em cliente mínimo 1000×562 físico. O Windows também pode limitar pedidos programáticos menores; não confunda pedido e tamanho efetivamente observado. Não altera o canvas nem pede rebuild do renderer. INIs existentes são preservados pelo build e não são migrados automaticamente. O monitor PowerShell somente-leitura, resultados e protocolo de comparação estão em [PERFORMANCE.md](PERFORMANCE.md); crescimento curto não confirma vazamento ou sua origem.
+
+`SystemCursor=1` só suprime o bitmap após confirmar a seta nativa visível. Em um estado real da 0.6, `GetCursorInfo` permaneceu com flags=0/handle nulo e o bitmap continuou ativo, inclusive após movimentos sintéticos; esse caso não valida a seta independente. Execuções novas da mesma 0.6, com mínimo padrão e opt-out, tiveram 240/240 amostras visíveis após resize, como o controle 0.5; a causa do primeiro estado não foi determinada. Flags=0 (oculto) e `CURSOR_SUPPRESSED=2` (política de toque/caneta) são distintos. Não force contadores de `ShowCursor` ou políticas globais para ocultar o problema; compare uma execução nova e a base preservada antes de atribuir causa.
+
 ## 0.5: texto e movimento do cursor
 
 A revisão 0.5 usa `dist-v0.5\` e acrescenta `[render] SmoothFonts=1` e `[input] SystemCursor=1`, somente no modo escalado. O texto recebe antialiasing na origem, não blur geral; o cursor passa a ser a seta do Windows, independente da cadência do renderer. Para comparar com o comportamento anterior, use `SmoothFonts=0` / `SystemCursor=0` com o Lake fechado. Fontes bitmap e formas especializadas do cursor têm limites explícitos em [UI-QUALITY.md](UI-QUALITY.md).

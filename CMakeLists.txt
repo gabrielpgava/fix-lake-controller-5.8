@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(lake_controller_windowed_fix VERSION 0.5.0 LANGUAGES CXX)
+project(lake_controller_windowed_fix VERSION 0.6.0 LANGUAGES CXX)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     message(FATAL_ERROR "Windows x86 required. MSVC: -A Win32. MinGW: i686 toolchain.")
@@ -56,6 +56,8 @@ if(BUILD_TESTING)
     add_test(NAME scale_geometry COMMAND LakeFixScaleGeometryTest)
     add_test(NAME ui_quality_policy COMMAND LakeFixUiQualityTest)
     add_test(NAME scaled_presenter_objects COMMAND LakeFixPresenterTest)
+    add_test(NAME resource_metrics_policy COMMAND powershell.exe -NoProfile -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/Resource-Metrics.Test.ps1")
     lake_warnings(FakeContour)
     lake_warnings(LakeFixFixture)
     lake_warnings(LakeFixInjectionTest)
@@ -77,3 +79,4 @@ endif()
 
 install(TARGETS LakeWindowedFix LakeWindowedLauncher RUNTIME DESTINATION . LIBRARY DESTINATION .)
 install(FILES LICENSE DESTINATION .)
+install(FILES scripts/Measure-LakeResources.ps1 scripts/LakeResourceMetrics.psm1 DESTINATION .)

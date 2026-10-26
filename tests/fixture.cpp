@@ -72,6 +72,43 @@ void Check(bool condition, const char* name) {
     if (!condition) ++failures;
 }
 
+void TestScaledWindowSizePolicy() {
+    const SIZE defaults = lakefix::ScaledMinimum(lakefix::kScaledMinWidth, lakefix::kScaledMinHeight);
+    Check(defaults.cx == 800 && defaults.cy == 450, "scaled minimum defaults to 800x450 logical client pixels");
+    const struct {
+        UINT width, height;
+        SIZE expected;
+    } minimumCases[] = {
+        {320, 180, {320, 180}}, {8192, 8192, {8192, 8192}}, {1200, 675, {1200, 675}},
+        {0, 0, {800, 450}}, {319, 600, {800, 600}}, {960, 179, {960, 450}},
+        {8193, 700, {800, 700}}, {1024, 8193, {1024, 450}},
+        {static_cast<UINT>(-1), 720, {800, 720}}, {1280, static_cast<UINT>(-1), {1280, 450}}
+    };
+    for (const auto& value : minimumCases) {
+        const SIZE result = lakefix::ScaledMinimum(value.width, value.height);
+        Check(result.cx == value.expected.cx && result.cy == value.expected.cy,
+              "minimum bounds accept inclusive limits and fall back independently per axis");
+    }
+    const SIZE normal = lakefix::AtLeastMinimum({1024, 576}, defaults);
+    Check(normal.cx == 1024 && normal.cy == 576, "default initial view remains 1024x576");
+    const SIZE raised = lakefix::AtLeastMinimum({320, 180}, {1200, 675});
+    Check(raised.cx == 1200 && raised.cy == 675, "initial view grows to a larger configured minimum");
+    const SIZE mixed = lakefix::AtLeastMinimum({1400, 360}, defaults);
+    Check(mixed.cx == 1400 && mixed.cy == 450, "initial minimum is applied independently per axis");
+    const struct {
+        SIZE requested, work, expected;
+    } workCases[] = {
+        {{816, 489}, {1920, 1040}, {816, 489}}, {{1000, 580}, {1000, 580}, {1000, 580}},
+        {{1216, 714}, {1000, 580}, {1000, 580}}, {{2016, 489}, {1000, 580}, {1000, 489}},
+        {{816, 939}, {1000, 580}, {816, 580}}, {{816, 489}, {0, -1}, {816, 489}}
+    };
+    for (const auto& value : workCases) {
+        const SIZE result = lakefix::ClampToWorkArea(value.requested, value.work);
+        Check(result.cx == value.expected.cx && result.cy == value.expected.cy,
+              "outer minimum fits the work area per axis without enlarging it or using unknown bounds");
+    }
+}
+
 struct DiagnosticLockProbe {
     SRWLOCK lock = SRWLOCK_INIT;
     HANDLE ready = nullptr;
@@ -486,7 +523,51 @@ void ResizeScaledHost(HWND renderer, HWND frame, LONG width, LONG height, bool m
     if (actual.right == width && actual.bottom == height) TestScaledMouse(renderer, width, height);
 }
 
-void RunScaledWindowPath(HINSTANCE instance, bool unicode) {
+void CheckScaledHostSizePolicy(HWND frame, const wchar_t* configuration) {
+    const SIZE minimum = lakefix::ScaledMinimum(
+        GetPrivateProfileIntW(L"window", L"MinWidth", lakefix::kScaledMinWidth, configuration),
+        GetPrivateProfileIntW(L"window", L"MinHeight", lakefix::kScaledMinHeight, configuration));
+    const DWORD style = static_cast<DWORD>(GetWindowLongW(frame, GWL_STYLE));
+    const DWORD exStyle = static_cast<DWORD>(GetWindowLongW(frame, GWL_EXSTYLE));
+    RECT minimumOuter{0, 0, minimum.cx, minimum.cy}, borders{};
+    MONITORINFO monitor{};
+    monitor.cbSize = sizeof(monitor);
+    const bool geometry = AdjustWindowRectEx(&minimumOuter, style, FALSE, exStyle) &&
+        AdjustWindowRectEx(&borders, style, FALSE, exStyle) &&
+        GetMonitorInfoW(MonitorFromWindow(frame, MONITOR_DEFAULTTONEAREST), &monitor);
+    Check(geometry, "obtain logical frame borders and host monitor work area for minimum policy");
+    if (!geometry) return;
+    const SIZE work{monitor.rcWork.right - monitor.rcWork.left, monitor.rcWork.bottom - monitor.rcWork.top};
+    const SIZE expected = lakefix::ClampToWorkArea(
+        {minimumOuter.right - minimumOuter.left, minimumOuter.bottom - minimumOuter.top}, work);
+    MINMAXINFO limits{};
+    SendMessageW(frame, WM_GETMINMAXINFO, 0, reinterpret_cast<LPARAM>(&limits));
+    Check(limits.ptMinTrackSize.x == expected.cx && limits.ptMinTrackSize.y == expected.cy,
+          "scaled tracking minimum is configured client plus frame, capped to monitor work area");
+    RECT area{}, outer{};
+    const bool measured = GetClientRect(frame, &area) && GetWindowRect(frame, &outer);
+    Check(measured, "measure hidden initial host without showing it or rebuilding graphics");
+    if (!measured) return;
+    Check(area.right > 0 && area.bottom > 0 && outer.right - outer.left <= work.cx &&
+          outer.bottom - outer.top <= work.cy, "initial scaled host has pixels and fits the monitor work area");
+    const SIZE actualBorders{outer.right - outer.left - area.right, outer.bottom - outer.top - area.bottom};
+    const LONG borderWidth = borders.right - borders.left, borderHeight = borders.bottom - borders.top;
+    const bool minimumFitsWidth = minimum.cx + borderWidth <= work.cx && minimum.cx + actualBorders.cx <= work.cx;
+    const bool minimumFitsHeight = minimum.cy + borderHeight <= work.cy && minimum.cy + actualBorders.cy <= work.cy;
+    Check((!minimumFitsWidth || area.right >= minimum.cx) && (!minimumFitsHeight || area.bottom >= minimum.cy),
+          "initial host meets the configured minimum on every feasible axis");
+    SIZE requested{static_cast<LONG>(GetPrivateProfileIntW(L"window", L"Width", 1024, configuration)),
+                   static_cast<LONG>(GetPrivateProfileIntW(L"window", L"Height", 576, configuration))};
+    if (requested.cx < 320 || requested.cx > 8192) requested.cx = 1024;
+    if (requested.cy < 180 || requested.cy > 8192) requested.cy = 576;
+    const SIZE initial = lakefix::AtLeastMinimum(requested, minimum);
+    const bool initialFitsWidth = initial.cx + borderWidth <= work.cx && initial.cx + actualBorders.cx <= work.cx;
+    const bool initialFitsHeight = initial.cy + borderHeight <= work.cy && initial.cy + actualBorders.cy <= work.cy;
+    Check((!initialFitsWidth || area.right == initial.cx) && (!initialFitsHeight || area.bottom == initial.cy),
+          "fitting initial dimensions retain max(window size, configured minimum)");
+}
+
+void RunScaledWindowPath(HINSTANCE instance, bool unicode, const wchar_t* configuration, bool policyOnly) {
     printf("Scaled %s creation/recreation path\n", unicode ? "Unicode" : "ANSI");
     // Deliberately request a different native size: [render], not the initial
     // CreateWindow dimensions or [window], owns the fixed renderer dimensions.
@@ -519,9 +600,18 @@ void RunScaledWindowPath(HINSTANCE instance, bool unicode) {
     Check(FixedScaledSource(lake, frame), "render INI creates fixed 1536x864 client at origin");
     RECT initialHost{};
     GetClientRect(frame, &initialHost);
+    CheckScaledHostSizePolicy(frame, configuration);
+    Check(!GetPropW(frame, L"LakeWindowedFix.HostSetupCompleted"), "host readiness starts deferred");
+    if (policyOnly) {
+        // The runner gives each policy its own process/INI. Never reload a live
+        // shim policy or show extra windows just to test tracking constraints.
+        DestroyWindow(frame);
+        lake = nullptr;
+        Pump();
+        return;
+    }
     Check(initialHost.right >= 320 && initialHost.bottom >= 180 && initialHost.right <= 1024 && initialHost.bottom <= 576 &&
           initialHost.right < 1536 && initialHost.bottom < 864, "host is born at fitting window size, smaller than source");
-    Check(!GetPropW(frame, L"LakeWindowedFix.HostSetupCompleted"), "host readiness starts deferred");
     const int initialSizeMessages = nativeClientSizes;
     SendMessageW(frame, WM_SIZE, SIZE_RESTORED, MAKELPARAM(800, 450));
     SendMessageW(frame, WM_SIZE, SIZE_MINIMIZED, 0);
@@ -564,13 +654,6 @@ void RunScaledWindowPath(HINSTANCE instance, bool unicode) {
     Check(resizes == 0 && nativeClientSizes == initialSizeMessages && nativeParentMessages == 0,
           "readiness never calls ContourParent or native renderer WM_SIZE");
 
-    MINMAXINFO limits{};
-    SendMessageW(frame, WM_GETMINMAXINFO, 0, reinterpret_cast<LPARAM>(&limits));
-    RECT minimum{0, 0, 320, 180};
-    const bool minimumAdjusted = AdjustWindowRectEx(&minimum, static_cast<DWORD>(GetWindowLongW(frame, GWL_STYLE)),
-                                                    FALSE, static_cast<DWORD>(GetWindowLongW(frame, GWL_EXSTYLE))) != FALSE;
-    Check(minimumAdjusted && limits.ptMinTrackSize.x == minimum.right - minimum.left &&
-          limits.ptMinTrackSize.y == minimum.bottom - minimum.top, "scaled minimum is 320x180 client plus frame borders");
     ResizeScaledHost(lake, frame, 800, 450, false, initialSizeMessages);
     ResizeScaledHost(lake, frame, 400, 300, true, initialSizeMessages);
     TestScaledMessagePoints(lake, frame);
@@ -629,6 +712,8 @@ int RunScaledFixture(const wchar_t* configuration) {
     Check(sizeof(void*) == 4, "x86 scaled fixture");
     Check(GetPrivateProfileIntW(L"render", L"Width", 0, configuration) == 1536 &&
           GetPrivateProfileIntW(L"render", L"Height", 0, configuration) == 864, "scaled suite has independent render configuration");
+    TestScaledWindowSizePolicy();
+    const bool policyOnly = GetPrivateProfileIntW(L"fixture", L"WindowPolicyOnly", 0, configuration) == 1;
     HMODULE fontModule = LoadLibraryW(L"Contour.dll");
     Check(fontModule != nullptr, "load synthetic renderer for module-scoped font hook");
     if (fontModule) {
@@ -677,7 +762,7 @@ int RunScaledFixture(const wchar_t* configuration) {
     ansi.lpszClassName = "Lake Controller";
     const bool ansiRegistered = RegisterClassExA(&ansi) != 0;
     Check(ansiRegistered, "register ANSI native client fixture");
-    if (ansiRegistered) RunScaledWindowPath(instance, false);
+    if (ansiRegistered) RunScaledWindowPath(instance, false, configuration, policyOnly);
     const bool unregistered = ansiRegistered && UnregisterClassA("Lake Controller", instance) != FALSE;
     Check(unregistered, "ANSI client class can be replaced after complete cleanup");
     if (unregistered) {
@@ -689,7 +774,7 @@ int RunScaledFixture(const wchar_t* configuration) {
         const bool wideRegistered = RegisterClassExW(&wide) != 0;
         Check(wideRegistered, "register genuine Unicode native client fixture");
         if (wideRegistered) {
-            RunScaledWindowPath(instance, true);
+            RunScaledWindowPath(instance, true, configuration, policyOnly);
             UnregisterClassW(wide.lpszClassName, instance);
         }
     }
@@ -755,7 +840,12 @@ int wmain(int argc, wchar_t** argv) {
     Check(!(GetWindowLongW(lake, GWL_EXSTYLE) & WS_EX_TOPMOST), "no topmost client");
     MINMAXINFO limits{};
     SendMessageW(frame, WM_GETMINMAXINFO, 0, reinterpret_cast<LPARAM>(&limits));
-    Check(limits.ptMinTrackSize.x > 800 && limits.ptMinTrackSize.y > 600, "host minimum includes non-client borders");
+    RECT minimum{0, 0, lakefix::kMinWidth, lakefix::kMinHeight};
+    const bool minimumAdjusted = AdjustWindowRectEx(&minimum, static_cast<DWORD>(GetWindowLongW(frame, GWL_STYLE)),
+                                                    FALSE, static_cast<DWORD>(GetWindowLongW(frame, GWL_EXSTYLE))) != FALSE;
+    Check(minimumAdjusted && limits.ptMinTrackSize.x == minimum.right - minimum.left &&
+          limits.ptMinTrackSize.y == minimum.bottom - minimum.top,
+          "legacy 800x600 client minimum includes frame borders and ignores scaled minimum keys");
     Pump(); // Simulate a nested PeekMessage loop DURING plugin initialization.
     Check(!IsWindowVisible(frame) && resizes == 0, "startup pumping cannot trigger premature rebuild");
     // Match the native plugin's vtable+0x24 method: post 0x8032, then

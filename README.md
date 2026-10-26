@@ -1,5 +1,15 @@
 # Lake Controller Windowed Fix
 
+## 0.6 experimental: custo de input e usabilidade
+
+A candidata 0.6 mantém canvas **1088×612**, janela inicial **1024×576 lógica**, fontes/cursor da 0.5 e **32 bits de cor**. Trabalha em snapshots locais de geometria/input, uma única amostra de hit-test do cursor, eliminação de pintura GDI sem barras e consultas diagnósticas somente quando necessárias.
+
+Acrescenta `[window] MinWidth=800` / `MinHeight=450` como mínimo **interativo e configurável**, limitado à área útil do monitor. `320/180` restaura o limite anterior. O renderer não é reconstruído por resize. Um monitor PowerShell somente-leitura permite observar CPU/memória por mais tempo, sem enviar input ou alterar o Lake.
+
+Saída separada **`dist-v0.6\`**, preservando 0.3/0.4/0.5. Build Zig x86: **1.159 PASS, zero falhas e zero warnings, oito suítes**. O ensaio OFFLINE confirmou mínimo padrão/opt-out, 48/48 cliques Home/Modules, resize, margens e foco. Uma observação de cinco minutos completou 300 amostras válidas. Em execuções novas, a seta nativa teve 240/240 amostras visíveis após resize e foco; houve também um estado anterior oculto, com fallback bitmap e causa não determinada.
+
+Não se promete ganho de FPS nem correção de vazamento: a memória privada também cresceu no controle 0.4. Resultados, limites e uso do monitor em [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
 ## 0.5 experimental: fontes e cursor
 
 A 0.5 mantém o canvas **1088×612** e a janela inicial **1024×576 pixels lógicos**, no modo escalado (`ScaleRendering=1`, `NativeResize=0`), e acrescenta:
@@ -20,7 +30,7 @@ Detalhes, limites, testes e comparação de cor em [docs/UI-QUALITY.md](docs/UI-
 .\dist-v0.5\LakeWindowedLauncher.exe --app-dir "C:\Program Files (x86)\Lake\Lake Controller v5.8" --wait
 ```
 
-Para compilar a revisão atual com Zig, use `-OutputDirectory dist-v0.5`. INIs existentes não são migrados automaticamente: confira as duas opções novas ao lado da DLL.
+Esta seção registra a 0.5 preservada no commit `915c517`. Para a revisão atual, use a saída 0.6 dos exemplos de build abaixo. INIs existentes não são migrados automaticamente: confira as opções ao lado da DLL.
 
 ## Base 0.4 e histórico
 
@@ -99,7 +109,7 @@ Veja [docs/ANALYSIS.md](docs/ANALYSIS.md) para hashes, RVAs, evidências, limite
 
 ## Compilar do zero
 
-O build atual 0.5 x86 Zig passou nas **sete suítes, 746 verificações**, com ensaio real limitado descrito em [UI-QUALITY.md](docs/UI-QUALITY.md). MSVC/MinGW são alternativas documentadas, não toolchains executadas neste ambiente. Os exemplos abaixo usam **`dist-v0.5`**; preserve as saídas históricas 0.3/0.4.
+A 0.6 x86 Zig passou em **oito suítes, 1.159 verificações**, incluindo a política do monitor de recursos; resultados e limites em [PERFORMANCE.md](docs/PERFORMANCE.md). A base 0.5 preservada passou em sete suítes/746 verificações. MSVC/MinGW são alternativas documentadas, não toolchains executadas neste ambiente. Os exemplos abaixo usam **`dist-v0.6`**; preserve as saídas históricas 0.3/0.4/0.5.
 
 ### MSVC / Visual Studio 2022
 
@@ -108,10 +118,10 @@ O build atual 0.5 x86 Zig passou nas **sete suítes, 746 verificações**, com e
 3. Na raiz do projeto:
 
 ```powershell
-.\scripts\Build.ps1 -Toolchain MSVC -OutputDirectory dist-v0.5
+.\scripts\Build.ps1 -Toolchain MSVC -OutputDirectory dist-v0.6
 ```
 
-O script usa `-A Win32`; a integração inclui cenários Win32 e testes separados ScaleGeometry, UiQuality e Presenter. `-OutputDirectory` funciona em todas as toolchains; os exemplos isolam a 0.5 em `dist-v0.5\` (sem o parâmetro, a saída padrão continua `dist\`). O CRT do MSVC é estático (`/MT`). Python e o software Lake **não são necessários para compilar ou rodar os testes sintéticos**.
+O script usa `-A Win32`; a integração inclui cenários Win32, testes separados ScaleGeometry, UiQuality e Presenter, e cálculos PowerShell do monitor. `-OutputDirectory` funciona em todas as toolchains; os exemplos isolam a 0.6 em `dist-v0.6\` (sem o parâmetro, a saída padrão continua `dist\`). O CRT do MSVC é estático (`/MT`). Python e o software Lake **não são necessários para compilar ou rodar os testes sintéticos**.
 
 Equivalente CMake:
 
@@ -119,8 +129,8 @@ Equivalente CMake:
 cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A Win32
 cmake --build build-msvc --config Release --parallel
 ctest --test-dir build-msvc -C Release --output-on-failure
-cmake --install build-msvc --config Release --prefix dist-v0.5
-Copy-Item .\config\LakeWindowedFix.ini .\dist-v0.5\LakeWindowedFix.ini
+cmake --install build-msvc --config Release --prefix dist-v0.6
+Copy-Item .\config\LakeWindowedFix.ini .\dist-v0.6\LakeWindowedFix.ini
 ```
 
 O último comando manual substitui a configuração; o script de build a preserva. Confira `ScaleRendering=1`, `NativeResize=0` e as novas seções antes do reteste: um INI antigo não é migrado automaticamente. Se sua política de scripts bloquear arquivos baixados, revise-os e desbloqueie apenas esses arquivos conforme a política local; não é necessário mudar a política global da máquina.
@@ -130,7 +140,7 @@ O último comando manual substitui a configuração; o script de build a preserv
 Com CMake, Ninja e compilador **i686** disponíveis no PATH:
 
 ```powershell
-.\scripts\Build.ps1 -Toolchain MinGW -MinGWCompiler i686-w64-mingw32-g++.exe -OutputDirectory dist-v0.5
+.\scripts\Build.ps1 -Toolchain MinGW -MinGWCompiler i686-w64-mingw32-g++.exe -OutputDirectory dist-v0.6
 ```
 
 Uma toolchain exclusivamente x64 não serve. Não misture DLL x64 com o processo Lake x86. Não instale DLLs deste projeto em `System32`/`SysWOW64`.
@@ -140,14 +150,14 @@ Uma toolchain exclusivamente x64 não serve. Não misture DLL x64 com o processo
 O script aceita Zig **0.14.1** já extraído; não faz downloads nem modifica PATH/configuração global:
 
 ```powershell
-.\scripts\Build.ps1 -Toolchain Zig -ZigPath C:\tools\zig\zig.exe -OutputDirectory dist-v0.5
+.\scripts\Build.ps1 -Toolchain Zig -ZigPath C:\tools\zig\zig.exe -OutputDirectory dist-v0.6
 ```
 
 Também é possível obter a distribuição Python desse compilador em uma pasta local ignorada, explicitamente:
 
 ```powershell
 python -m pip install --target .\build-tools\python ziglang==0.14.1
-.\scripts\Build.ps1 -Toolchain Zig -ZigPath .\build-tools\python\ziglang\zig.exe -OutputDirectory dist-v0.5
+.\scripts\Build.ps1 -Toolchain Zig -ZigPath .\build-tools\python\ziglang\zig.exe -OutputDirectory dist-v0.6
 ```
 
 Esse comando baixa uma toolchain de terceiros; é opcional. Consulte [docs/VALIDATION.md](docs/VALIDATION.md) para o que foi efetivamente compilado/testado.
@@ -155,13 +165,13 @@ Esse comando baixa uma toolchain de terceiros; é opcional. Consulte [docs/VALID
 ## Usar sem instalar (recomendado para o primeiro teste)
 
 1. Feche outras instâncias do Lake. Faça backup dos seus presets/configurações pelos mecanismos normais do software.
-2. Com o build 0.5, em ambiente de teste sem processadores de áudio em produção, execute:
+2. Com o build 0.6, em ambiente de teste sem processadores de áudio em produção, execute:
 
 ```powershell
-.\dist-v0.5\LakeWindowedLauncher.exe --app-dir "C:\Program Files (x86)\Lake\Lake Controller v5.8" --wait
+.\dist-v0.6\LakeWindowedLauncher.exe --app-dir "C:\Program Files (x86)\Lake\Lake Controller v5.8" --wait
 ```
 
-O launcher, a DLL e o INI devem permanecer juntos em `dist-v0.5\`; não é necessário escrever na pasta do Lake. O próprio Lake ainda pode precisar das permissões e dependências originais da instalação.
+O launcher, a DLL e o INI devem permanecer juntos em `dist-v0.6\`; não é necessário escrever na pasta do Lake. O próprio Lake ainda pode precisar das permissões e dependências originais da instalação.
 
 3. Confira interface inteira, barra inferior/comandos da direita, movimento, resize/maximizar, mouse, Alt+Tab e minimizar/restaurar seguindo [a matriz](docs/VALIDATION.md). Não habilite `NativeResize=1` para obter resize no padrão novo: isso desliga a escala e volta ao rebuild legado.
 4. Para voltar ao comportamento original, feche o Lake e inicie `Lake Controller.exe` diretamente. Os hooks só existem no novo processo lançado pelo patch.
@@ -181,10 +191,10 @@ Inicie `LakeWindowedLauncher.exe`, não o EXE original. Não substitua `Contour.
 Há também um instalador conservador que verifica hashes, recusa sobrescrever arquivos existentes e grava um manifesto dos seus próprios arquivos:
 
 ```powershell
-.\scripts\Install.ps1 -AppDirectory "C:\Program Files (x86)\Lake\Lake Controller v5.8" -SourceDirectory dist-v0.5
+.\scripts\Install.ps1 -AppDirectory "C:\Program Files (x86)\Lake\Lake Controller v5.8" -SourceDirectory dist-v0.6
 ```
 
-O exemplo seleciona explicitamente a compilação isolada nova com `-SourceDirectory dist-v0.5`. Os mesmos três nomes de arquivo são usados; não instale enquanto houver uma instância do Lake aberta.
+O exemplo seleciona explicitamente a compilação isolada nova com `-SourceDirectory dist-v0.6`. Os mesmos três nomes de arquivo são usados; não instale enquanto houver uma instância do Lake aberta. O monitor pode ser executado separadamente da distribuição; o instalador continua copiando somente os três arquivos de runtime.
 
 Escrever em `Program Files` normalmente exige PowerShell elevado. O script não se autoeleva. Para remover uma instalação feita por esse script:
 
@@ -202,6 +212,8 @@ Edite `LakeWindowedFix.ini` **ao lado da DLL**, não necessariamente na pasta do
 [window]
 Width=1024
 Height=576
+MinWidth=800
+MinHeight=450
 
 [compatibility]
 ScaleRendering=1
@@ -218,11 +230,11 @@ SystemCursor=1
 
 | Modo | Flags | Comportamento |
 | --- | --- | --- |
-| Escalado, padrão 0.4/0.5 | `ScaleRendering=1`, `NativeResize=0` | Moldura redimensionável/maximizável; canvas fixo; sem rebuild nativo pelo resize do host |
+| Escalado, padrão 0.4/0.5/0.6 | `ScaleRendering=1`, `NativeResize=0` | Moldura redimensionável/maximizável; canvas fixo; sem rebuild nativo pelo resize do host |
 | Fixo diagnóstico, legado 0.3 | `ScaleRendering=0`, `NativeResize=0` | Framebuffer original; sem resize/maximizar; `[window]` não ajusta o tamanho; pode haver recorte |
 | Rebuild nativo, EXPERIMENTAL | `NativeResize=1` | Tem precedência e desabilita a escala; recria recursos e pode continuar cortando a UI |
 
-No modo escalado, **`[window]` controla só a janela**: padrão 1024×576, mínimo interativo 320×180, tamanho inicial ajustado à área útil. São pixels lógicos, não dimensões físicas garantidas em DPI alto. Valores de configuração fora de 320–8192 na largura ou 180–8192 na altura voltam ao padrão correspondente.
+No modo escalado, **`[window]` controla só a janela**: padrão inicial 1024×576 e mínimo interativo padrão 800×450 na 0.6. `MinWidth`/`MinHeight` são configuráveis; `320/180` restaura o limite pequeno anterior. Tamanho inicial e mínimo são ajustados à área útil quando necessário. São pixels lógicos, não dimensões físicas garantidas em DPI alto. Valores fora de 320–8192 na largura ou 180–8192 na altura voltam ao padrão de cada opção; detalhes em [PERFORMANCE.md](docs/PERFORMANCE.md).
 
 **`[render]` controla o canvas virtual fixo**: padrão **1088×612**, largura aceita **1024–4096**, altura **600–4096**. Fora dessas faixas, volta a 1088/612. Trocar o canvas exige fechar/reabrir o Lake; não é resize em tempo real. O presenter consulta a superfície fonte atual. Uma janela menor escala a interface inteira, mas não torna o texto legível em qualquer tamanho mínimo.
 
@@ -231,7 +243,7 @@ Com `NativeResize=1`, o mínimo legado é 800×600; use, por exemplo, `[window] 
 Para comparar somente as flags internas, **sem bordas/host/hooks**, há um diagnóstico:
 
 ```powershell
-.\dist-v0.5\LakeWindowedLauncher.exe --app-dir "C:\Program Files (x86)\Lake\Lake Controller v5.8" --native-only --wait
+.\dist-v0.6\LakeWindowedLauncher.exe --app-dir "C:\Program Files (x86)\Lake\Lake Controller v5.8" --native-only --wait
 # Ou, sem compilar:
 .\scripts\Start-NativeWindowed.ps1 -AppDirectory "C:\Program Files (x86)\Lake\Lake Controller v5.8"
 ```

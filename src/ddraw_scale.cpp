@@ -199,10 +199,13 @@ void LogFailure(ScalePresenterLog log, const wchar_t* operation, HRESULT result)
 }
 
 void LogDescriptionFailure(ScalePresenterLog log, HRESULT result) noexcept {
-    wchar_t text[192]{};
-    std::swprintf(text, ARRAYSIZE(text), L"Scaled presentation bypassed: GetSurfaceDesc HRESULT=0x%08lX",
-                  static_cast<unsigned long>(result));
-    LogOnce(log, descriptionFailureLogged, text);
+    if (log && !descriptionFailureLogged.load(std::memory_order_relaxed)) {
+        wchar_t text[192]{};
+        std::swprintf(text, ARRAYSIZE(text), L"Scaled presentation bypassed: GetSurfaceDesc HRESULT=0x%08lX",
+                      static_cast<unsigned long>(result));
+        LogOnce(log, descriptionFailureLogged, text);
+    }
+    // The generic failure diagnostic has its own once flag.
     LogFailure(log, L"GetSurfaceDesc", result);
 }
 
@@ -279,14 +282,15 @@ struct Forwarder<Proxy, Return (STDMETHODCALLTYPE*)(Self*, Args...), Member> {
         if (!proxy.value) return E_UNEXPECTED;
         UnwrapScope inputs;
         std::tuple<Args...> mapped{inputs.Map(args)...};
-        const auto config = GetConfiguration();
         auto* real = proxy->real;
         error.Restore();
         const Return result = std::apply([&](auto&&... nativeArgs) {
             return (real->lpVtbl->*Member)(real, nativeArgs...);
         }, mapped);
         error.Capture();
-        LogFailure(config.log, L"forwarded COM method", result);
+        // Logging-only paths sample the logger after native failure, so a
+        // reentrant ConfigureScalePresenter in that call selects the logger.
+        if (FAILED(result)) LogFailure(GetConfiguration().log, L"forwarded COM method", result);
         return result;
     }
 };
@@ -334,7 +338,7 @@ HRESULT STDMETHODCALLTYPE ProxyQueryInterface(typename Proxy::Interface* self, R
     error.Restore();
     const HRESULT result = proxy->real->lpVtbl->QueryInterface(proxy->real, id, output);
     error.Capture();
-    LogFailure(GetConfiguration().log, L"QueryInterface", result);
+    if (FAILED(result)) LogFailure(GetConfiguration().log, L"QueryInterface", result);
     return result;
 }
 
@@ -408,14 +412,13 @@ HRESULT STDMETHODCALLTYPE DrawCreateSurface(IDirectDraw7* self, LPDDSURFACEDESC2
     error.Restore();
     const HRESULT result = proxy->real->lpVtbl->CreateSurface(proxy->real, description, output, nativeOuter);
     error.Capture();
-    const auto config = GetConfiguration();
     if (SUCCEEDED(result) && primary && output && *output) {
         auto* replacement = *output;
         if (Adopt<SurfaceProxy>(*output, proxy->owner, SurfaceTable(), &replacement)) *output = replacement;
-        else LogOnce(config.log, primaryWrapFailureLogged,
+        else LogOnce(GetConfiguration().log, primaryWrapFailureLogged,
                      L"Scaled presentation bypassed: primary proxy allocation/capacity unavailable; native output retained");
     }
-    LogFailure(config.log, L"CreateSurface", result);
+    if (FAILED(result)) LogFailure(GetConfiguration().log, L"CreateSurface", result);
     return result;
 }
 
@@ -427,7 +430,7 @@ HRESULT STDMETHODCALLTYPE DrawSetCooperativeLevel(IDirectDraw7* self, HWND windo
     const HRESULT result = proxy->real->lpVtbl->SetCooperativeLevel(proxy->real, window, flags);
     error.Capture();
     if (SUCCEEDED(result)) proxy->owner->window.store(window, std::memory_order_release);
-    LogFailure(GetConfiguration().log, L"SetCooperativeLevel", result);
+    if (FAILED(result)) LogFailure(GetConfiguration().log, L"SetCooperativeLevel", result);
     return result;
 }
 
@@ -467,7 +470,7 @@ HRESULT STDMETHODCALLTYPE SurfaceGetClipper(IDirectDrawSurface7* self, LPDIRECTD
     error.Restore();
     const HRESULT result = proxy->real->lpVtbl->GetClipper(proxy->real, output);
     error.Capture();
-    LogFailure(GetConfiguration().log, L"GetClipper", result);
+    if (FAILED(result)) LogFailure(GetConfiguration().log, L"GetClipper", result);
     return result;
 }
 
@@ -567,8 +570,11 @@ HRESULT STDMETHODCALLTYPE SurfaceBlt(IDirectDrawSurface7* self, LPRECT destinati
             {full.left, fitted.top, fitted.left, fitted.bottom},
             {fitted.right, fitted.top, full.right, fitted.bottom}
         };
-        bool painted = false;
-        if (proxy->fallbackFill.load() && config.painter) painted = config.painter(window, strips, ARRAYSIZE(strips));
+        // Empty strips need neither native fills nor the latched fallback
+        // painter. The real image Blt below still decides success/geometry.
+        bool painted = !HasArea(strips[0]) && !HasArea(strips[1]) && !HasArea(strips[2]) && !HasArea(strips[3]);
+        if (!painted && proxy->fallbackFill.load() && config.painter)
+            painted = config.painter(window, strips, ARRAYSIZE(strips));
         DDBLTFX fill{};
         fill.dwSize = sizeof(fill);
         fill.dwFillColor = 0;

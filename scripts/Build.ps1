@@ -39,6 +39,7 @@ if ($Toolchain -eq 'Zig') {
         Invoke-Checked (Join-Path $build 'LakeFixScaleGeometryTest.exe') @()
         Invoke-Checked (Join-Path $build 'LakeFixUiQualityTest.exe') @()
         Invoke-Checked (Join-Path $build 'LakeFixPresenterTest.exe') @()
+        & (Join-Path $root 'tests/Resource-Metrics.Test.ps1')
         Invoke-Checked $zig ($common + @('-shared', (Join-Path $root 'tests/renderer_fixture.cpp'),
             '-luser32', '-lgdi32', '-o', (Join-Path $build 'Contour.dll')))
         Invoke-Checked $zig ($common + @((Join-Path $root 'tests/fixture.cpp'), '-luser32', '-lgdi32', '-municode',
@@ -73,4 +74,5 @@ if ($Toolchain -eq 'Zig') {
 $ini = Join-Path $dist 'LakeWindowedFix.ini'
 if (!(Test-Path $ini)) { Copy-Item (Join-Path $root 'config/LakeWindowedFix.ini') $ini }
 Copy-Item (Join-Path $root 'LICENSE') $dist
+Copy-Item (Join-Path $root 'scripts/Measure-LakeResources.ps1'), (Join-Path $root 'scripts/LakeResourceMetrics.psm1') $dist
 Write-Host "Build x86 disponivel em $dist"

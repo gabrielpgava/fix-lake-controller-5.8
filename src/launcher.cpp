@@ -498,7 +498,7 @@ int wmain(int argc, wchar_t** argv) {
 #else
     if (nativeOnly) wprintf(L"Processo criado (PID %lu), flags nativas sem hooks.\n", process.dwProcessId);
     else {
-        wprintf(L"Processo criado (PID %lu); DLL v0.5 inicializada. Isso ainda nao confirma que a janela principal abriu.\n",
+        wprintf(L"Processo criado (PID %lu); DLL v0.6 inicializada. Isso ainda nao confirma que a janela principal abriu.\n",
                 process.dwProcessId);
         wprintf(L"Log esperado: %ls\\logs\\LakeWindowedFix-%lu.log\n", patchDirectory.c_str(), process.dwProcessId);
     }

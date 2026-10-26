@@ -40,6 +40,7 @@ bool nativeResizeEnabled;
 bool scaleRenderingEnabled = true;
 SIZE renderSize{1088, 612};
 SIZE initialViewSize{1024, 576};
+SIZE minimumViewSize{lakefix::kScaledMinWidth, lakefix::kScaledMinHeight};
 bool canvasLayoutSeeded;
 bool closeAfterStartup;
 bool smoothFontsEnabled = true;
@@ -97,7 +98,7 @@ void InitializeLog() {
 void Log(const wchar_t* text, bool nonBlocking = false) {
     const DWORD error = GetLastError();
     wchar_t line[768]{};
-    swprintf_s(line, L"[LakeWindowedFix 0.5] tick=%llu pid=%lu tid=%lu %ls\r\n",
+    swprintf_s(line, L"[LakeWindowedFix 0.6] tick=%llu pid=%lu tid=%lu %ls\r\n",
                GetTickCount64(), GetCurrentProcessId(), GetCurrentThreadId(), text);
     // Exit/exception observers must not wait for a debugger notification.
     if (!nonBlocking) OutputDebugStringW(line);
@@ -171,6 +172,10 @@ void LoadResizePolicy() {
                 GetPrivateProfileIntW(L"compatibility", L"ScaleRendering", 1, ini) == 1;
             initialViewSize.cx = GetPrivateProfileIntW(L"window", L"Width", 1024, ini);
             initialViewSize.cy = GetPrivateProfileIntW(L"window", L"Height", 576, ini);
+            if (scaleRenderingEnabled)
+                minimumViewSize = lakefix::ScaledMinimum(
+                    GetPrivateProfileIntW(L"window", L"MinWidth", lakefix::kScaledMinWidth, ini),
+                    GetPrivateProfileIntW(L"window", L"MinHeight", lakefix::kScaledMinHeight, ini));
             renderSize.cx = GetPrivateProfileIntW(L"render", L"Width", 1088, ini);
             renderSize.cy = GetPrivateProfileIntW(L"render", L"Height", 612, ini);
             smoothFontsEnabled = GetPrivateProfileIntW(L"render", L"SmoothFonts", 1, ini) == 1;
@@ -247,6 +252,23 @@ bool LocalViewport(SIZE source, RECT& area, RECT& viewport) {
     return viewport.right > viewport.left && viewport.bottom > viewport.top;
 }
 
+// Stack-only input geometry. Reuse it within one API call, never across queue
+// peeks, dispatches or events. ClientProc's ordinary mapping needs no origin.
+struct InputGeometry {
+    SIZE source{};
+    RECT area{};
+    RECT viewport{};
+    POINT origin{};
+    bool hasOrigin = false;
+};
+
+bool CaptureInputGeometry(InputGeometry& geometry, bool screenCoordinates = false) {
+    geometry.source = CurrentSourceSize();
+    if (!LocalViewport(geometry.source, geometry.area, geometry.viewport)) return false;
+    geometry.hasOrigin = screenCoordinates && ClientToScreen(client, &geometry.origin);
+    return true;
+}
+
 bool ScaledViewport(HWND window, LONG width, LONG height, RECT* full, RECT* fitted) noexcept {
     if (window != client || width <= 0 || height <= 0 || width > 16384 || height > 16384) return false;
     const DWORD saved = GetLastError();
@@ -279,13 +301,16 @@ bool PaintLetterbox(HWND window, const RECT* strips, UINT count) noexcept {
     if (window != client || !host || !strips || count > 4 || !GetClientRect(host, &area) ||
         !ClientToScreen(host, &origin)) { SetLastError(saved); return false; }
     RECT local[4]{};
+    bool hasPixels = false;
     for (UINT i = 0; i < count; ++i) {
         local[i] = strips[i];
         OffsetRect(&local[i], -origin.x, -origin.y);
         if (local[i].left < 0 || local[i].top < 0 || local[i].right > area.right || local[i].bottom > area.bottom) {
             SetLastError(saved); return false;
         }
+        if (local[i].right > local[i].left && local[i].bottom > local[i].top) hasPixels = true;
     }
+    if (!hasPixels) { SetLastError(saved); return true; }
     HDC dc = GetDC(host);
     bool result = dc != nullptr;
     if (dc) {
@@ -300,19 +325,17 @@ bool PaintLetterbox(HWND window, const RECT* strips, UINT count) noexcept {
 }
 
 bool MapClientPoint(POINT real, POINT& mapped) {
-    RECT area{}, view{};
-    const SIZE source = CurrentSourceSize();
-    if (!LocalViewport(source, area, view)) return false;
-    mapped = lakefix::ViewToSource(view, source, real);
+    InputGeometry geometry;
+    if (!CaptureInputGeometry(geometry)) return false;
+    mapped = lakefix::ViewToSource(geometry.viewport, geometry.source, real);
     return true;
 }
 
-bool MapScreenPoint(POINT real, POINT& mapped) {
-    POINT origin{};
-    if (!client || !ClientToScreen(client, &origin)) return false;
-    POINT source{};
-    if (!MapClientPoint({real.x - origin.x, real.y - origin.y}, source)) return false;
-    mapped = {origin.x + source.x, origin.y + source.y};
+bool MapScreenPoint(const InputGeometry& geometry, POINT real, POINT& mapped) {
+    if (!geometry.hasOrigin) return false;
+    const POINT source = lakefix::ViewToSource(geometry.viewport, geometry.source,
+        {real.x - geometry.origin.x, real.y - geometry.origin.y});
+    mapped = {geometry.origin.x + source.x, geometry.origin.y + source.y};
     return true;
 }
 
@@ -397,21 +420,25 @@ BOOL CALLBACK AttachExistingChildCursor(HWND window, LPARAM) {
     return TRUE;
 }
 
-bool CursorOverHost() {
-    POINT point{};
-    if (!host || IsIconic(host) || !GetCursorPos(&point)) return false;
-    const HWND under = WindowFromPoint(point);
-    return under && GetAncestor(under, GA_ROOT) == host;
-}
+struct CursorHostSample {
+    bool overHost = false;
+    bool insideClient = false;
+};
 
-bool CursorInsideHostClient() {
+CursorHostSample SampleCursorHost() {
+    CursorHostSample sample;
     POINT point{};
-    if (!host || !client || IsIconic(host) || !GetCursorPos(&point)) return false;
+    if (!host || IsIconic(host) || !GetCursorPos(&point)) return sample;
     const HWND under = WindowFromPoint(point);
-    if (under == client || IsChild(client, under)) return true;
-    if (under != host) return false;
-    RECT area{};
-    return ScreenToClient(host, &point) && GetClientRect(host, &area) && PtInRect(&area, point);
+    sample.overHost = under && GetAncestor(under, GA_ROOT) == host;
+    if (client) {
+        if (under == client || IsChild(client, under)) sample.insideClient = true;
+        else if (under == host) {
+            RECT area{};
+            sample.insideClient = ScreenToClient(host, &point) && GetClientRect(host, &area) && PtInRect(&area, point);
+        }
+    }
+    return sample;
 }
 
 int WINAPI HookMapWindowPoints(HWND from, HWND to, LPPOINT points, UINT count) {
@@ -424,14 +451,15 @@ int WINAPI HookMapWindowPoints(HWND from, HWND to, LPPOINT points, UINT count) {
         // Outside this host, leave the other application's cursor alone and
         // suppress Lake's stale bitmap. Inside, suppress only after confirming
         // a visible OS cursor. Hidden-count/modal cases retain the legacy sprite.
-        const bool overHost = CursorOverHost();
-        if (!overHost) RestoreCursorVisibility();
-        bool suppress = !CursorInsideHostClient();
+        const CursorHostSample sample = SampleCursorHost();
+        if (!sample.overHost) RestoreCursorVisibility();
+        bool suppress = !sample.insideClient;
         if (!suppress) {
             SetCursor(systemArrow);
             EnsureCursorVisible();
             CURSORINFO info{};
             info.cbSize = sizeof(info);
+            // Suppressed or unknown OS visibility retains the bitmap fallback.
             suppress = GetCursorInfo(&info) && (info.flags & CURSOR_SHOWING) && info.hCursor == systemArrow;
         }
         if (suppress && lakefix::HideSoftwareCursorRectangle(points, count) && !systemCursorLogged) {
@@ -477,31 +505,23 @@ BOOL WINAPI HookCursorPosition(LPPOINT point) {
     if (result && point && scaleRenderingEnabled && client && host) {
         const POINT real = *point;
         const HWND under = WindowFromPoint(*point);
-        RECT hostArea{};
-        POINT hostOrigin{};
-        const bool inHostClient = under == host && GetClientRect(host, &hostArea) &&
-            ClientToScreen(host, &hostOrigin) && point->x >= hostOrigin.x && point->y >= hostOrigin.y &&
-            point->x < hostOrigin.x + hostArea.right && point->y < hostOrigin.y + hostArea.bottom;
         const HWND capture = GetCapture();
-        if (under == client || IsChild(client, under) || inHostClient || capture == client || IsChild(client, capture)) {
-            POINT origin{};
-            POINT local = *point;
-            if (ClientToScreen(client, &origin)) {
-                local.x -= origin.x;
-                local.y -= origin.y;
-                POINT mapped{};
-                if (MapClientPoint(local, mapped)) {
-                    point->x = origin.x + mapped.x;
-                    point->y = origin.y + mapped.y;
-                    // Verified build-007 getter -> offset -> setter pair.
-                    // Other setters (notably SetCursorPos(0,0) during rebuild)
-                    // must retain physical/screen semantics, not be inverted.
-                    if (RendererCallsite(caller, 0x36fc43)) {
-                        RECT area{}, view{};
-                        const SIZE source = CurrentSourceSize();
-                        if (LocalViewport(source, area, view))
-                            cursorRoundTrip = {true, client, real, *point, view, source};
-                    }
+        const bool clientHitOrCapture = under == client || IsChild(client, under) ||
+            capture == client || IsChild(client, capture);
+        if (clientHitOrCapture || under == host) {
+            InputGeometry geometry;
+            if (CaptureInputGeometry(geometry, true) && geometry.hasOrigin) {
+                POINT hostOrigin{};
+                const bool inHostClient = under == host && ClientToScreen(host, &hostOrigin) &&
+                    real.x >= hostOrigin.x && real.y >= hostOrigin.y &&
+                    real.x < hostOrigin.x + geometry.area.right && real.y < hostOrigin.y + geometry.area.bottom;
+                if (clientHitOrCapture || inHostClient) {
+                    MapScreenPoint(geometry, real, *point);
+                    // Verified build-007 getter -> offset -> setter pair. Retain
+                    // exactly the geometry that produced this virtual point.
+                    // Other setters keep physical/screen semantics.
+                    if (RendererCallsite(caller, 0x36fc43))
+                        cursorRoundTrip = {true, client, real, *point, geometry.viewport, geometry.source};
                 }
             }
         }
@@ -528,13 +548,15 @@ void MapMessagePoint(MSG* message) {
     if (!message || !scaleRenderingEnabled || !client ||
         message->message < WM_MOUSEFIRST || message->message > WM_MOUSELAST ||
         (message->hwnd != client && message->hwnd != host && !IsChild(client, message->hwnd))) return;
+    InputGeometry geometry;
+    const bool haveGeometry = CaptureInputGeometry(geometry, true);
     const bool wheel = message->message == WM_MOUSEWHEEL || message->message == WM_MOUSEHWHEEL;
     if (wheel) message->hwnd = client; // Original main wheel router scales it once.
     else {
         POINT raw{static_cast<short>(LOWORD(message->lParam)), static_cast<short>(HIWORD(message->lParam))};
         MapWindowPoints(message->hwnd, client, &raw, 1);
-        POINT source{};
-        if (!MapClientPoint(raw, source)) return;
+        if (!haveGeometry) return;
+        POINT source = lakefix::ViewToSource(geometry.viewport, geometry.source, raw);
         HWND target = GetCapture();
         if (target != client && !IsChild(client, target)) {
             target = client;
@@ -562,7 +584,7 @@ void MapMessagePoint(MSG* message) {
     // Contour's private loop also consumes MSG.pt directly.
     // Main lParam is mapped at dispatch; native child local lParam was mapped
     // above, since native child cursor subclasses never rewrite mouse input.
-    if (MapScreenPoint(message->pt, mapped)) message->pt = mapped;
+    if (haveGeometry && MapScreenPoint(geometry, message->pt, mapped)) message->pt = mapped;
 }
 
 BOOL WINAPI HookClientRectangle(HWND window, LPRECT rectangle) {
@@ -727,11 +749,20 @@ LRESULT CALLBACK HostProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
         }
         break;
     case WM_GETMINMAXINFO: {
-        const RECT r = OuterSize(scaleRenderingEnabled ? 320 : lakefix::kMinWidth,
-                                 scaleRenderingEnabled ? 180 : lakefix::kMinHeight);
+        // Interactive tracking only; programmatic host resizing stays native.
+        const RECT r = OuterSize(scaleRenderingEnabled ? minimumViewSize.cx : lakefix::kMinWidth,
+                                 scaleRenderingEnabled ? minimumViewSize.cy : lakefix::kMinHeight);
         auto* limits = reinterpret_cast<MINMAXINFO*>(lparam);
         const LRESULT result = DefSubclassProc(window, message, wparam, lparam);
-        limits->ptMinTrackSize = {r.right - r.left, r.bottom - r.top};
+        SIZE minimum{r.right - r.left, r.bottom - r.top};
+        if (scaleRenderingEnabled) {
+            MONITORINFO monitor{};
+            monitor.cbSize = sizeof(monitor);
+            if (GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor))
+                minimum = lakefix::ClampToWorkArea(minimum,
+                    {monitor.rcWork.right - monitor.rcWork.left, monitor.rcWork.bottom - monitor.rcWork.top});
+        }
+        limits->ptMinTrackSize = {minimum.cx, minimum.cy};
         return result;
     }
     case WM_ENTERSIZEMOVE:
@@ -932,6 +963,9 @@ HWND MakeHost(HINSTANCE instance, int width, int height) {
         }
         className = kScaledHostClass;
         frameInstance = self;
+        const SIZE initial = lakefix::AtLeastMinimum(initialViewSize, minimumViewSize);
+        viewWidth = initial.cx;
+        viewHeight = initial.cy;
         if (!GetMonitorInfoW(MonitorFromWindow(nullptr, MONITOR_DEFAULTTOPRIMARY), &monitor)) return nullptr;
         const RECT borders = OuterSize(0, 0);
         const LONG bw = borders.right - borders.left, bh = borders.bottom - borders.top;

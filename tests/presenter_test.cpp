@@ -115,13 +115,16 @@ struct FakeDraw {
     FakeSurface* nextSurface = nullptr;
     HRESULT createResult = S_OK;
     HRESULT coopResult = S_OK;
+    HRESULT evaluateResult = S_FALSE;
     LPDDSURFACEDESC2 seenDescription = nullptr;
     LPDIRECTDRAWSURFACE7* seenOutput = nullptr;
     IUnknown* seenOuter = nullptr;
     HWND seenWindow = nullptr;
     DWORD seenFlags = 0;
+    DWORD incomingEvaluateError = 0;
     IDirectDrawSurface7* seenSurface = nullptr;
     void (*onFinalRelease)(FakeDraw*) noexcept = nullptr;
+    void (*onEvaluateMode)(FakeDraw*) noexcept = nullptr;
 };
 
 FakeDraw* realDraws[96]{};
@@ -333,10 +336,16 @@ HRESULT STDMETHODCALLTYPE Cooperative(IDirectDraw7* self, HWND window, DWORD fla
     return value->coopResult;
 }
 HRESULT STDMETHODCALLTYPE EvaluateMode(IDirectDraw7* self, DWORD flags, DWORD* timeout) {
-    if (!Native(self, 29)) return E_FAIL;
+    auto* value = Native(self, 29);
+    if (!value) return E_FAIL;
+    value->seenFlags = flags;
+    value->incomingEvaluateError = GetLastError();
     if (timeout) *timeout = flags + 17;
+    const HRESULT result = value->evaluateResult;
+    const auto callback = value->onEvaluateMode;
+    if (callback) callback(value);
     SetLastError(nativeError);
-    return S_FALSE;
+    return result;
 }
 HRESULT STDMETHODCALLTYPE Duplicate(IDirectDraw7* self, LPDIRECTDRAWSURFACE7 surface,
                                      LPDIRECTDRAWSURFACE7* output) {
@@ -622,6 +631,23 @@ HWND ClipWindow(HWND owner) noexcept {
     SetLastError(0x7172);
     return clipHost;
 }
+unsigned previousLoggerCalls = 0, updatedLoggerCalls = 0, nativeReconfigurations = 0;
+bool loggerReentryObserved = false;
+lakefix::ScalePresenterLog nativeReplacementLog = nullptr;
+void PreviousDiagnostic(const wchar_t* text) noexcept {
+    ++previousLoggerCalls;
+    Diagnostic(text);
+}
+void UpdatedDiagnostic(const wchar_t* text) noexcept {
+    ++updatedLoggerCalls;
+    loggerReentryObserved = StatsAre(1, 0, 1, 1);
+    Diagnostic(text); // Reenters stats/configuration and changes LastError.
+}
+void ReconfigureFromEvaluate(FakeDraw*) noexcept {
+    ++nativeReconfigurations;
+    lakefix::ConfigureScalePresenter(nullptr, nativeReplacementLog);
+    SetLastError(0x7173);
+}
 bool IsBlackStrip(const BltCall& call, const RECT& expected) noexcept {
     return SameRect(call.destination, expected) && !call.source && !call.sourceRect &&
            call.flags == (DDBLT_COLORFILL | DDBLT_WAIT) && call.fillSize == sizeof(DDBLTFX) &&
@@ -781,6 +807,43 @@ void TestAllForwardersAndArguments() {
     Check(StatsAre(0, 0, 0, 0), "complete-forwarder test leaves no owned proxy objects");
 }
 
+void TestForwarderLoggingConfiguration() {
+    ResetFixtures(); lakefix::ConfigureScalePresenter(nullptr, PreviousDiagnostic);
+    FakeDraw real{}; Initialize(real); auto* draw = Wrap(real);
+    real.onEvaluateMode = ReconfigureFromEvaluate;
+    previousLoggerCalls = updatedLoggerCalls = nativeReconfigurations = 0;
+    loggerReentryObserved = false;
+    nativeReplacementLog = UpdatedDiagnostic;
+    DWORD timeout = 0;
+    SetLastError(0x8381);
+    Check(draw->lpVtbl->EvaluateMode(draw, 31, &timeout) == S_FALSE && timeout == 48 && real.seenFlags == 31 &&
+          real.incomingEvaluateError == 0x8381 && GetLastError() == nativeError &&
+          nativeReconfigurations == 1 && !previousLoggerCalls && !updatedLoggerCalls,
+          "successful forwarder preserves native arguments/LastError across reentrant configuration without logging");
+    lakefix::ConfigureScalePresenter(nullptr, PreviousDiagnostic);
+    nativeReplacementLog = nullptr; real.evaluateResult = E_FAIL;
+    SetLastError(0x8382);
+    Check(draw->lpVtbl->EvaluateMode(draw, 37, &timeout) == E_FAIL && timeout == 54 && real.seenFlags == 37 &&
+          real.incomingEvaluateError == 0x8382 && GetLastError() == nativeError &&
+          nativeReconfigurations == 2 && !previousLoggerCalls && !updatedLoggerCalls,
+          "forwarder failure uses a logger disabled inside the native call rather than the prior snapshot");
+    nativeReplacementLog = UpdatedDiagnostic;
+    SetLastError(0x8383);
+    Check(draw->lpVtbl->EvaluateMode(draw, 41, &timeout) == E_FAIL && timeout == 58 && real.seenFlags == 41 &&
+          real.incomingEvaluateError == 0x8383 && GetLastError() == nativeError && nativeReconfigurations == 3 &&
+          !previousLoggerCalls && updatedLoggerCalls == 1 && failureLogs == 1 && loggerReentryObserved,
+          "forwarder first failure uses the new logger outside the registry lock and preserves native HRESULT/LastError");
+    real.evaluateResult = E_INVALIDARG;
+    SetLastError(0x8384);
+    Check(draw->lpVtbl->EvaluateMode(draw, 43, &timeout) == E_INVALIDARG && timeout == 60 &&
+          real.incomingEvaluateError == 0x8384 && GetLastError() == nativeError &&
+          nativeReconfigurations == 4 && !previousLoggerCalls && updatedLoggerCalls == 1,
+          "repeated forwarded failure retains the native error and one-shot logging");
+    draw->lpVtbl->Release(draw);
+    lakefix::ConfigureScalePresenter(nullptr, nullptr);
+    Check(StatsAre(0, 0, 0, 0), "reentrant forwarder logging test releases all proxy allocations");
+}
+
 void TestPresentationAndClipping() {
     ResetFixtures(); lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow);
     FakeDraw real{}; FakeSurface surface{}, source{}, auxiliary{}, peer{}; FakeClipper clipper{};
@@ -846,9 +909,22 @@ void TestPresentationAndClipping() {
     Check(surface.blts == 1 && !surface.fills && LastCall(surface).destinationPointer == &destination,
           "out-of-host fitted rectangle is rejected before painting");
     source.descriptionResult = E_FAIL; surface.presentationResult = DDERR_SURFACELOST; ClearCalls(surface);
+    lakefix::ConfigureScalePresenter(Viewport, nullptr, ClipWindow);
+    SetLastError(0x8283);
+    Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects) == DDERR_SURFACELOST &&
+          surface.blts == 1 && !surface.fills && LastCall(surface).destinationPointer == &destination &&
+          LastCall(surface).source == &source.iface && LastCall(surface).flags == flags && LastCall(surface).effects == &effects &&
+          LastCall(surface).incomingError == 0x8283 && GetLastError() == bltError && !descriptionLogs,
+          "unlogged descriptor failure preserves native Blt and does not consume its diagnostic");
+    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow); ClearCalls(surface);
     Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects) == DDERR_SURFACELOST &&
           surface.blts == 1 && LastCall(surface).destinationPointer == &destination && descriptionLogs == 1 && GetLastError() == bltError,
           "GetSurfaceDesc failure logs and preserves the real fallback failure");
+    ClearCalls(surface); SetLastError(0x8284);
+    Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects) == DDERR_SURFACELOST &&
+          surface.blts == 1 && !surface.fills && LastCall(surface).destinationPointer == &destination &&
+          LastCall(surface).incomingError == 0x8284 && GetLastError() == bltError && descriptionLogs == 1 && failureLogs == 1,
+          "repeated descriptor failure keeps one-shot diagnostics and still calls the real failing Blt");
     source.descriptionResult = S_OK; source.width = 0; ClearCalls(surface);
     primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects);
     Check(surface.blts == 1 && LastCall(surface).destinationPointer == &destination, "invalid source dimensions fail open to native Blt");
@@ -967,11 +1043,51 @@ void TestLetterboxFallback() {
     Check(primary->lpVtbl->Blt(primary, &original, &source.iface, nullptr, DDBLT_WAIT, nullptr) == S_FALSE &&
           fallbackPaintCalls == 2 && !realPrimary.fills && realPrimary.blts == 1,
           "subsequent geometry changes avoid unsupported native primary fills");
-    realPrimary.presentationResult = E_ACCESSDENIED;
-    Check(primary->lpVtbl->Blt(primary, &original, &source.iface, nullptr, DDBLT_WAIT, nullptr) == E_ACCESSDENIED,
+    const RECT letterboxClient = fullClient, letterboxViewport = fittedViewport, originalDestination = original;
+    DDBLTFX effects{}; effects.dwSize = sizeof(effects); effects.dwDDFX = DDBLTFX_MIRRORLEFTRIGHT;
+    const DWORD flags = DDBLT_WAIT | DDBLT_DDFX;
+    const unsigned queries = source.descriptions;
+    fittedViewport = fullClient; fallbackPaintSuccess = false; ClearCalls(realPrimary);
+    SetLastError(0x9291);
+    Check(primary->lpVtbl->Blt(primary, &original, &source.iface, nullptr, flags, &effects) == S_FALSE &&
+          fallbackPaintCalls == 2 && !realPrimary.fills && realPrimary.blts == 1 && source.descriptions == queries + 1 &&
+          SameRect(LastCall(realPrimary).destination, fullClient) && LastCall(realPrimary).source == &source.iface &&
+          !LastCall(realPrimary).sourceRect && LastCall(realPrimary).flags == flags && LastCall(realPrimary).effects == &effects &&
+          SameRect(original, originalDestination) && LastCall(realPrimary).incomingError == 0x9291 && GetLastError() == bltError,
+          "latched fallback with empty strips skips painter/fills but presents with real arguments and LastError");
+    OffsetRect(&fullClient, 5, 5); fittedViewport = fullClient;
+    realPrimary.presentationResult = E_FAIL; ClearCalls(realPrimary); SetLastError(0x9292);
+    Check(primary->lpVtbl->Blt(primary, &original, &source.iface, nullptr, flags, &effects) == E_FAIL &&
+          fallbackPaintCalls == 2 && !realPrimary.fills && realPrimary.blts == 1 && source.descriptions == queries + 2 &&
+          SameRect(LastCall(realPrimary).destination, fullClient) && LastCall(realPrimary).source == &source.iface &&
+          !LastCall(realPrimary).sourceRect && LastCall(realPrimary).flags == flags && LastCall(realPrimary).effects == &effects &&
+          LastCall(realPrimary).incomingError == 0x9292 && GetLastError() == bltError,
+          "empty strips after geometry change never mask the real presentation E_FAIL or LastError");
+    lakefix::ConfigureScalePresenter(FallbackViewport, nullptr, nullptr, nullptr);
+    realPrimary.presentationResult = S_FALSE; ClearCalls(realPrimary); SetLastError(0x9293);
+    Check(primary->lpVtbl->Blt(primary, &original, &source.iface, nullptr, flags, &effects) == S_FALSE &&
+          fallbackPaintCalls == 2 && !realPrimary.fills && realPrimary.blts == 1 && source.descriptions == queries + 3 &&
+          SameRect(LastCall(realPrimary).destination, fullClient) && LastCall(realPrimary).source == &source.iface &&
+          !LastCall(realPrimary).sourceRect && LastCall(realPrimary).flags == flags && LastCall(realPrimary).effects == &effects &&
+          LastCall(realPrimary).incomingError == 0x9293 && GetLastError() == bltError,
+          "latched fallback with no painter and empty strips cannot manufacture a fill failure");
+    OffsetRect(&fullClient, 5, 5); fittedViewport = fullClient;
+    realPrimary.presentationResult = E_FAIL; ClearCalls(realPrimary); SetLastError(0x9294);
+    Check(primary->lpVtbl->Blt(primary, &original, &source.iface, nullptr, flags, &effects) == E_FAIL &&
+          fallbackPaintCalls == 2 && !realPrimary.fills && realPrimary.blts == 1 && source.descriptions == queries + 4 &&
+          SameRect(LastCall(realPrimary).destination, fullClient) && LastCall(realPrimary).source == &source.iface &&
+          !LastCall(realPrimary).sourceRect && LastCall(realPrimary).flags == flags && LastCall(realPrimary).effects == &effects &&
+          LastCall(realPrimary).incomingError == 0x9294 && GetLastError() == bltError,
+          "missing painter with empty strips still returns the actual native E_FAIL and LastError");
+    fullClient = letterboxClient; fittedViewport = letterboxViewport;
+    lakefix::ConfigureScalePresenter(FallbackViewport, nullptr, nullptr, FallbackPaint);
+    fallbackPaintSuccess = true; realPrimary.presentationResult = E_ACCESSDENIED; ClearCalls(realPrimary);
+    Check(primary->lpVtbl->Blt(primary, &original, &source.iface, nullptr, DDBLT_WAIT, nullptr) == E_ACCESSDENIED &&
+          fallbackPaintCalls == 3 && !realPrimary.fills && realPrimary.blts == 1,
           "letterbox fallback never hides a real presentation failure");
-    fallbackPaintSuccess = false;
-    Check(primary->lpVtbl->Blt(primary, &original, &source.iface, nullptr, DDBLT_WAIT, nullptr) == DDERR_EXCEPTION,
+    fallbackPaintSuccess = false; ClearCalls(realPrimary);
+    Check(primary->lpVtbl->Blt(primary, &original, &source.iface, nullptr, DDBLT_WAIT, nullptr) == DDERR_EXCEPTION &&
+          fallbackPaintCalls == 5 && realPrimary.fills == 1 && realPrimary.blts == 1,
           "failed owned-window fallback preserves actual fill failure");
     primary->lpVtbl->Release(primary); draw->lpVtbl->Release(draw);
     source.iface.lpVtbl->Release(&source.iface);
@@ -1115,7 +1231,8 @@ int wmain() {
     static_assert(sizeof(drawTable) == 30 * sizeof(void*), "DD7 completeness");
     static_assert(sizeof(surfaceTable) == 49 * sizeof(void*), "Surface7 completeness");
     Check(StatsAre(0, 0, 0, 0), "presenter starts empty");
-    TestNativeIdentityAndTransfer(); TestAllForwardersAndArguments(); TestPresentationAndClipping();
+    TestNativeIdentityAndTransfer(); TestAllForwardersAndArguments(); TestForwarderLoggingConfiguration();
+    TestPresentationAndClipping();
     TestSurfaceIndependentLifetime(); TestLetterboxFallback(); TestReentrancyAndReuse(); TestBounds(); TestConcurrentTransfers();
     lakefix::ConfigureScalePresenter(nullptr, nullptr, nullptr);
     Check(!badNativeThis && !badNativeArguments, "every native fake received real this, original table and native interface arguments");

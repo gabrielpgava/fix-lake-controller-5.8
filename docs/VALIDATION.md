@@ -1,5 +1,9 @@
 # Validação e limites
 
+## Revisão 0.6 experimental
+
+Otimizações locais de input/apresentação, mínimo configurável e monitor somente-leitura estão descritos em [PERFORMANCE.md](PERFORMANCE.md), junto dos resultados atuais. A candidata usa `dist-v0.6/`, preservando versões anteriores. **1.159 verificações passaram, zero falhas, oito suítes Zig x86**; o ensaio OFFLINE confirmou mínimo padrão/opt-out, Home/Modules, resize, margens e foco, além de 300 amostras de recursos em cinco minutos. Execuções novas mantiveram a seta nativa em 240/240 amostras após resize/foco; um estado anterior oculto conservou o fallback bitmap, sem causa determinada. Os números históricos abaixo não são validação da 0.6.
+
 ## Revisão 0.5
 
 A validação das opções de fonte/cursor, as contagens atuais e a comparação isolada de 16/32 bits de cor estão em [UI-QUALITY.md](UI-QUALITY.md). Os resultados abaixo registram a **base 0.4 e seu histórico**, não substituem o reteste das opções novas. A 0.5 preserva as seis suítes anteriores e acrescenta `ui_quality_policy` / `LakeFixUiQualityTest.exe`.
