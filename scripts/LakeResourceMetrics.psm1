@@ -230,4 +230,22 @@ function Get-LakeResourceSummary {
     return [pscustomobject]$state
 }
 
-Export-ModuleMember -Function Get-LakeCpuMetrics, Get-LakeResourceSummary
+function Get-LakeObservationStopReason {
+    # Pure policy; the monitor retains its original native process handle and
+    # never reopens a PID. null means continue, never a zero counter substitute.
+    param([bool]$HasExited, [object]$ExpectedPid, [object]$ActualPid,
+        [object]$ExpectedCreation, [object]$ActualCreation,
+        [string]$ExpectedPath, [string]$ActualPath,
+        [long]$SampleCount, [long]$MaximumSamples,
+        [double]$ElapsedMilliseconds, [double]$DurationMilliseconds)
+    if ($HasExited) { return 'TargetExited' }
+    if ($ExpectedPid -ne $ActualPid -or $ExpectedCreation -ne $ActualCreation -or
+        -not [string]::Equals($ExpectedPath,$ActualPath,[StringComparison]::OrdinalIgnoreCase)) {
+        return 'TargetIdentityChanged'
+    }
+    if ($ElapsedMilliseconds -ge $DurationMilliseconds) { return 'DurationElapsed' }
+    if ($SampleCount -ge $MaximumSamples) { return 'MaximumSamplesReached' }
+    return $null
+}
+
+Export-ModuleMember -Function Get-LakeCpuMetrics, Get-LakeResourceSummary, Get-LakeObservationStopReason

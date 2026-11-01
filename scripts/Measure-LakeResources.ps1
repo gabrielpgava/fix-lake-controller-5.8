@@ -29,8 +29,8 @@ param(
     [Parameter(Mandatory)][ValidateRange(1, 2147483647)][int]$ProcessId,
     [ValidateNotNullOrEmpty()][string]$ApplicationPath = 'C:\Program Files (x86)\Lake\Lake Controller v5.8\Lake Controller.exe',
     [ValidateScript({
-        if ([double]::IsNaN($_) -or [double]::IsInfinity($_) -or $_ -lt 10 -or $_ -gt 7200) {
-            throw 'DurationSeconds must be finite and between 10 and 7200.'
+        if ([double]::IsNaN($_) -or [double]::IsInfinity($_) -or $_ -lt 10 -or $_ -gt 86400) {
+            throw 'DurationSeconds must be finite and between 10 and 86400 (24 hours).'
         }; $true
     })][double]$DurationSeconds = 300,
     [ValidateScript({
@@ -47,7 +47,10 @@ param(
             $_ -gt ([double][uint64]::MaxValue / 1048576.0)) {
             throw 'MaximumPrivateMiB must be a finite nonnegative counter threshold (0 disables it).'
         }; $true
-    })][double]$MaximumPrivateMiB = 0
+    })][double]$MaximumPrivateMiB = 0,
+    # Bound output even at the fastest cadence. Reaching this limit stops only
+    # this observer; choose a larger interval for a long run, not an unbounded log.
+    [ValidateRange(1, 1000000)][int]$MaximumSamples = 100000
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -315,6 +318,7 @@ namespace LakeResourceObservationV1 {
                 while ($true) {
                     $stage = 'ProcessMetadata'
                     if ($observer.HasExited) { $stopReason = 'TargetExited'; break }
+                    if ($metrics.SampleCount -ge $MaximumSamples) { $stopReason = 'MaximumSamplesReached'; break }
                     $nowMs = ([Diagnostics.Stopwatch]::GetTimestamp() - $originTicks) * $tickToMs
                     if ($nowMs -ge $durationMs) { $stopReason = 'DurationElapsed'; break }
                     if ($nowMs -lt $nextSampleMs) {
@@ -324,14 +328,13 @@ namespace LakeResourceObservationV1 {
                     }
                     $native = $observer.ReadSnapshot()
                     if ($observer.HasExited) { $stopReason = 'TargetExited'; break }
-                    if ($native.Identity.ProcessId -ne $ProcessId -or $native.Identity.CreationFileTime -ne $validatedCreation -or
-                        -not [string]::Equals([IO.Path]::GetFullPath($native.Identity.ImagePath), $validatedPath, [StringComparison]::OrdinalIgnoreCase)) {
-                        $stopReason = 'TargetIdentityChanged'
-                        Write-Warning 'Identity changed; observation stopped. Lake was not changed.'
-                        break
-                    }
                     $elapsedMs = ($native.Identity.MonotonicTimestamp - $originTicks) * $tickToMs
-                    if ($elapsedMs -ge $durationMs) { $stopReason = 'DurationElapsed'; break }
+                    $decision = Get-LakeObservationStopReason -HasExited $false -ExpectedPid $ProcessId -ActualPid $native.Identity.ProcessId `
+                        -ExpectedCreation $validatedCreation -ActualCreation $native.Identity.CreationFileTime `
+                        -ExpectedPath $validatedPath -ActualPath ([IO.Path]::GetFullPath($native.Identity.ImagePath)) `
+                        -SampleCount $metrics.SampleCount -MaximumSamples $MaximumSamples `
+                        -ElapsedMilliseconds $elapsedMs -DurationMilliseconds $durationMs
+                    if ($null -ne $decision) { $stopReason = $decision; break }
                     $stage = 'Metrics'
                     $cpu = [pscustomobject]@{ IsValid = $false; InvalidReason = 'NoPreviousSample'
                         CpuDeltaMilliseconds = $null; WallDeltaMilliseconds = $null
@@ -426,6 +429,7 @@ namespace LakeResourceObservationV1 {
                 ObservationStartedUtc = $observationStartedUtc; EndedUtc = $endedUtc
                 RequestedDurationSeconds = $DurationSeconds; RequestedIntervalSeconds = $IntervalSeconds
                 MaximumPrivateMiB = $MaximumPrivateMiB; LogicalProcessorCount = $logicalProcessorCount
+                MaximumSamples = $MaximumSamples
                 ObservationElapsedMilliseconds = $observationElapsedMs; SkippedSampleSlots = $skippedSampleSlots
                 StopReason = $stopReason; ErrorStage = $errorStage
                 ErrorType = $details.Type; Win32ErrorCode = $details.Win32ErrorCode

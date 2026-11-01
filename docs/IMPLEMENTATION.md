@@ -30,6 +30,12 @@ Geometria: 119; UI: 104; presenter: 116; profiler OFF: 97; profiler ON: 158.
 As demais suítes PowerShell/Win32 também terminaram com sucesso. Contagens históricas
 do README não são evidência da candidata. Setup e publicação têm validações separadas.
 
+Setup da baseline: executável sandbox original via `Start-Process -Wait -PassThru`
+com stdout/stderr separados: **58 checks, zero falhas, 1 skip opcional** (symlink,
+erro 1314; não contado como aprovação). A invocação do build com `*>` encontrou
+`NativeCommandError` ao redirecionar stderr informativo; não é falha dos 58 testes.
+Logs locais `build-baseline-setup-tests.stdout.log` / `.stderr.log`.
+
 ## Camadas de evidência
 
 1. **Lógica/matemática:** geometria, políticas, configuração, métricas e scripts/mock.
@@ -52,8 +58,8 @@ do README não são evidência da candidata. Setup e publicação têm validaç�
 | 4. Restore não invalida letterbox: risco estático reproduzível COM | `ddraw_scale.cpp`, presenter test | Invalidar após sucesso, preservar HRESULT/reentrância | Em implementação |
 | 4. Critério de frame amplo/publicação prematura: defeito lógico | presenter/provider, testes | Admitir papel/dimensões/destino; publicar somente após sucesso | Em implementação |
 | 5. Supressão global/log síncrono: defeito de diagnóstico/risco | presenter, logger, testes | Limites por operação, fila fixa, perdas, consumo fora do renderer/VEH | Em implementação |
-| 5. Inspeção omite host: defeito demonstrado no script | `Inspect-WindowState.py`, snapshots | Papel host/canvas e propriedade apenas no host, sem textos privados | Pendente |
-| 6. Estatísticas/sessão longa: melhoria de produto | DLL, monitor, testes | Stats baixa frequência; duração/arquivos limitados | Pendente |
+| 5. Inspeção omite host: defeito demonstrado no script | `Inspect-WindowState.py`, snapshots | Papel host/canvas e propriedade apenas no host, sem textos privados | 4 testes Python executados; [OBSERVATION.md](OBSERVATION.md) |
+| 6. Estatísticas/sessão longa: melhoria de produto | DLL, monitor, testes | Monitor até 24h com limite de linhas; stats DLL em implementação | 22+9 testes métricas/política/falhas executados; ensaio longo pendente |
 | 7. Reinstalação/remoção parcial: defeitos de lifecycle | setup engine/testes | Dados preservados reconhecíveis, ausência idempotente, recuperação | Em implementação independente |
 | 7. Upgrade/rollback transacional: melhoria de produto | setup engine | Staging, identidade anterior, configuração preservada | Não alegar suporte sem testes |
 | 8. Proveniência tardia/promoção parcial: defeitos de distribuição | scripts, testes, build | Build manifest, ligação dos testes, candidate check separado, rollback | Em implementação independente |

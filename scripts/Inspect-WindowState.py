@@ -14,6 +14,51 @@ from pathlib import Path
 import sys
 
 
+HOST_CLASSES = {"LakeWindowedFix.ScaledHost.v1", "ContourParent"}
+CANVAS_CLASS = "Lake Controller"
+
+
+def window_role(class_name):
+    if class_name == "LakeWindowedFix.ScaledHost.v1":
+        return "scaled-host"
+    if class_name == "ContourParent":
+        return "legacy-host"
+    if class_name == CANVAS_CLASS:
+        return "canvas"
+    return None
+
+
+def query_window(user, hwnd, tid, class_name):
+    """Known HWND metadata only. Never query control/window text or memory."""
+    rect = w.RECT()
+    client_rect = w.RECT()
+    rectangle_available = bool(user.GetWindowRect(hwnd, c.byref(rect)))
+    client_available = bool(user.GetClientRect(hwnd, c.byref(client_rect)))
+    style = user.GetWindowLongW(hwnd, -16) & 0xFFFFFFFF
+    # This property belongs to the host, not the Lake canvas. A missing canvas
+    # property must never be interpreted as failed host setup.
+    setup = (bool(user.GetPropW(hwnd, "LakeWindowedFix.HostSetupCompleted"))
+             if class_name in HOST_CLASSES else "NotApplicable")
+    return {
+        "hwnd": hex(hwnd), "tid": tid, "class": class_name,
+        "role": window_role(class_name),
+        "visible": bool(user.IsWindowVisible(hwnd)),
+        "visible_style_bit": bool(style & 0x10000000),
+        "enabled": bool(user.IsWindowEnabled(hwnd)), "style": hex(style),
+        "host_setup_completed": setup,
+        "parent": hex(user.GetParent(hwnd) or 0),
+        "rect": [rect.left, rect.top, rect.right, rect.bottom] if rectangle_available else None,
+        "client_rect": [client_rect.left, client_rect.top, client_rect.right, client_rect.bottom]
+        if client_available else None,
+    }
+
+
+def add_relationships(windows):
+    for window in windows:
+        window["known_children"] = [child["hwnd"] for child in windows if child["parent"] == window["hwnd"]]
+    return windows
+
+
 def inspect(selected_pid):
     if sys.platform != "win32":
         raise RuntimeError("Windows is required")
@@ -54,12 +99,12 @@ def inspect(selected_pid):
     user.GetWindowThreadProcessId.argtypes = [w.HWND, c.POINTER(w.DWORD)]
     user.GetWindowThreadProcessId.restype = w.DWORD
     user.GetClassNameW.argtypes = [w.HWND, w.LPWSTR, c.c_int]
-    user.GetWindowTextW.argtypes = [w.HWND, w.LPWSTR, c.c_int]
     user.GetWindowLongW.argtypes = [w.HWND, c.c_int]
     user.GetWindowLongW.restype = w.LONG
     user.GetParent.argtypes = [w.HWND]
     user.GetParent.restype = w.HWND
     user.GetWindowRect.argtypes = [w.HWND, c.POINTER(w.RECT)]
+    user.GetClientRect.argtypes = [w.HWND, c.POINTER(w.RECT)]
     user.IsWindowVisible.argtypes = [w.HWND]
     user.IsWindowEnabled.argtypes = [w.HWND]
     user.GetPropW.argtypes = [w.HWND, w.LPCWSTR]
@@ -75,21 +120,8 @@ def inspect(selected_pid):
         name = c.create_unicode_buffer(256)
         user.GetClassNameW(hwnd, name, len(name))
         result = results[pid.value]
-        if name.value in ("ContourParent", "Lake Controller"):
-            title = c.create_unicode_buffer(256)
-            user.GetWindowTextW(hwnd, title, len(title))
-            rect = w.RECT()
-            rectangle_available = bool(user.GetWindowRect(hwnd, c.byref(rect)))
-            style = user.GetWindowLongW(hwnd, -16) & 0xFFFFFFFF
-            result["main_windows"].append({
-                "hwnd": hex(hwnd), "tid": tid, "class": name.value, "title": title.value,
-                "visible": bool(user.IsWindowVisible(hwnd)),
-                "visible_style_bit": bool(style & 0x10000000),
-                "enabled": bool(user.IsWindowEnabled(hwnd)), "style": hex(style),
-                "host_setup_completed": bool(user.GetPropW(hwnd, "LakeWindowedFix.HostSetupCompleted")),
-                "parent": hex(user.GetParent(hwnd) or 0),
-                "rect": [rect.left, rect.top, rect.right, rect.bottom] if rectangle_available else None,
-            })
+        if window_role(name.value):
+            result["main_windows"].append(query_window(user, hwnd, tid, name.value))
         elif not child:
             classes = result["other_top_level_classes"]
             classes[name.value] = classes.get(name.value, 0) + 1
@@ -98,10 +130,12 @@ def inspect(selected_pid):
         return True
 
     user.EnumWindows(visit, 0)
+    for result in results.values():
+        add_relationships(result["main_windows"])
     return {"captured_at": datetime.now(timezone.utc).isoformat(),
             "source": "local-win32-window-query", "scope": "current-desktop-only",
             "processes": list(results.values()),
-            "limitations": ["No process memory, call stacks or renderer state inspected.",
+            "limitations": ["No process memory, window/control text, call stacks or renderer state inspected.",
                             "Window visibility does not establish graphics or network health.",
                             "This is local Python/Win32 output, not REA Evidence."]}
 
