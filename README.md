@@ -1,5 +1,13 @@
 # Lake Controller Windowed Fix
 
+## Instalação simples — instalador nativo
+
+Para o usuário final, o fluxo é **duplo clique no `LakeWindowedFix-Setup-v0.6.0.exe` do pacote de release > Instalar > atalho Lake Controller - Janela**. Detecta o Lake compatível, instala apenas no perfil do usuário e cria os atalhos, sem comandos ou edição manual de INI. O Lake original precisa estar instalado e não é substituído.
+
+O instalador passou em **58 verificações de sandbox**, sem falhas, e na verificação somente-leitura da interface/detecção automática. Um cenário opcional de links simbólicos foi pulado por falta de privilégio, não contado como sucesso. Não instalamos no perfil real nem homologamos uso em campo. Detalhes em [docs/SETUP.md](docs/SETUP.md). Os comandos abaixo são para desenvolvedores/usuários avançados, não passos obrigatórios para o operador. O executável ainda não é assinado digitalmente; Windows/EDR podem exigir revisão conforme a política local.
+
+Para desenvolvedores, o [Makefile](Makefile) oferece `make build`, `make installer`, `make package` e `make release`. A publicação é explícita, como prerelease experimental, com verificação de commit/hashes e sem incluir arquivos proprietários ou privados. As guardas de publicação têm **17 testes com Git/GitHub simulados**, sem mutação remota. Uso e pré-requisitos em [docs/RELEASE.md](docs/RELEASE.md).
+
 ## 0.6 experimental: custo de input e usabilidade
 
 A candidata 0.6 mantém canvas **1088×612**, janela inicial **1024×576 lógica**, fontes/cursor da 0.5 e **32 bits de cor**. Trabalha em snapshots locais de geometria/input, uma única amostra de hit-test do cursor, eliminação de pintura GDI sem barras e consultas diagnósticas somente quando necessárias.

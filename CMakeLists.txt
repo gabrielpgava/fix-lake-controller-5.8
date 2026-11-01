@@ -80,3 +80,42 @@ endif()
 install(TARGETS LakeWindowedFix LakeWindowedLauncher RUNTIME DESTINATION . LIBRARY DESTINATION .)
 install(FILES LICENSE DESTINATION .)
 install(FILES scripts/Measure-LakeResources.ps1 scripts/LakeResourceMetrics.psm1 DESTINATION .)
+
+# Optional self-contained, per-user GUI installer. The ordinary runtime build
+# and its validated DLL/INI do not depend on the packaging target.
+option(LAKE_BUILD_SETUP "Build the one-button per-user installer" OFF)
+if(LAKE_BUILD_SETUP)
+    set(setup_payload "${CMAKE_CURRENT_BINARY_DIR}/setup-payload/$<CONFIG>/installer_payload.h")
+    add_custom_command(OUTPUT "${setup_payload}"
+        COMMAND powershell.exe -NoProfile -File "${CMAKE_CURRENT_SOURCE_DIR}/scripts/New-InstallerPayload.ps1"
+            -RuntimeDirectory "$<TARGET_FILE_DIR:LakeWindowedFix>"
+            -ConfigurationDirectory "${CMAKE_CURRENT_SOURCE_DIR}/config"
+            -SupportDirectory "${CMAKE_CURRENT_SOURCE_DIR}/scripts"
+            -LicensePath "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+            -OutputHeader "${setup_payload}"
+        DEPENDS LakeWindowedFix LakeWindowedLauncher
+            config/LakeWindowedFix.ini LICENSE scripts/Measure-LakeResources.ps1
+            scripts/LakeResourceMetrics.psm1 scripts/New-InstallerPayload.ps1
+        VERBATIM)
+    if(MSVC)
+        enable_language(RC)
+        set(setup_manifest src/setup.rc)
+    else()
+        enable_language(ASM)
+        set(setup_manifest src/setup_manifest.S)
+    endif()
+    add_executable(LakeWindowedSetup WIN32 src/setup.cpp src/setup_engine.cpp "${setup_payload}" ${setup_manifest})
+    set_target_properties(LakeWindowedSetup PROPERTIES OUTPUT_NAME "LakeWindowedFix-Setup-v0.6")
+    target_include_directories(LakeWindowedSetup PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_BINARY_DIR}/setup-payload/$<CONFIG>")
+    target_link_libraries(LakeWindowedSetup PRIVATE bcrypt user32 gdi32 ole32 shell32 advapi32 uuid)
+    lake_warnings(LakeWindowedSetup)
+    install(TARGETS LakeWindowedSetup RUNTIME DESTINATION installer)
+    if(BUILD_TESTING)
+        add_executable(LakeFixSetupTest tests/setup_engine_test.cpp src/setup_engine.cpp ${setup_manifest})
+        target_link_libraries(LakeFixSetupTest PRIVATE bcrypt user32 gdi32 ole32 shell32 advapi32 uuid)
+        lake_warnings(LakeFixSetupTest)
+        add_test(NAME installer_sandbox COMMAND LakeFixSetupTest)
+        set_tests_properties(installer_sandbox PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    endif()
+endif()
