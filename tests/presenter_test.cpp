@@ -2,6 +2,7 @@
 #define NOMINMAX
 #define CINTERFACE
 #include "../src/ddraw_scale.h"
+#include "../src/profile.h"
 #include <ddraw.h>
 #include <cstddef>
 #include <cstdio>
@@ -91,6 +92,7 @@ struct FakeSurface {
     HRESULT getClipperResult = S_OK;
     unsigned descriptions = 0;
     bool descriptionSizeCorrect = true;
+    DWORD incomingDescriptionError = 0;
     unsigned blts = 0;
     unsigned fills = 0;
     BltCall bltCalls[16]{};
@@ -104,6 +106,7 @@ struct FakeSurface {
     FakeDraw* parent = nullptr;
     GUID seenGuid{};
     void (*onFinalRelease)(FakeSurface*) noexcept = nullptr;
+    void (*onDescription)(FakeSurface*) noexcept = nullptr;
     void (*onBlt)(FakeSurface*) noexcept = nullptr;
 };
 struct FakeDraw {
@@ -363,6 +366,7 @@ HRESULT STDMETHODCALLTYPE Duplicate(IDirectDraw7* self, LPDIRECTDRAWSURFACE7 sur
 HRESULT STDMETHODCALLTYPE Description(IDirectDrawSurface7* self, LPDDSURFACEDESC2 output) {
     auto* value = Native(self, 22);
     if (!value) return E_FAIL;
+    value->incomingDescriptionError = GetLastError();
     ++value->descriptions;
     if (!output) return E_POINTER;
     value->descriptionSizeCorrect = value->descriptionSizeCorrect && output->dwSize == sizeof(*output);
@@ -371,8 +375,11 @@ HRESULT STDMETHODCALLTYPE Description(IDirectDrawSurface7* self, LPDDSURFACEDESC
         output->dwWidth = value->width;
         output->dwHeight = value->height;
     }
+    const HRESULT result = value->descriptionResult;
+    const auto callback = value->onDescription;
+    if (callback) callback(value);
     SetLastError(0x5151);
-    return value->descriptionResult;
+    return result;
 }
 HRESULT STDMETHODCALLTYPE NativeBlt(IDirectDrawSurface7* self, LPRECT destination,
                                      LPDIRECTDRAWSURFACE7 source, LPRECT sourceRect,
@@ -926,8 +933,12 @@ void TestPresentationAndClipping() {
           LastCall(surface).incomingError == 0x8284 && GetLastError() == bltError && descriptionLogs == 1 && failureLogs == 1,
           "repeated descriptor failure keeps one-shot diagnostics and still calls the real failing Blt");
     source.descriptionResult = S_OK; source.width = 0; ClearCalls(surface);
+    // Keep the one-shot dimensions warning for the explicit replacement-logger
+    // snapshot regression below; this case still checks native fail-open geometry.
+    lakefix::ConfigureScalePresenter(Viewport, nullptr, ClipWindow);
     primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects);
     Check(surface.blts == 1 && LastCall(surface).destinationPointer == &destination, "invalid source dimensions fail open to native Blt");
+    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow);
     source.width = 1024; source.height = 768; fittedViewport = fullClient; surface.presentationResult = E_INVALIDARG; ClearCalls(surface);
     Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects) == E_INVALIDARG &&
           SameRect(LastCall(surface).destination, fittedViewport), "scaled presentation returns the negative native HRESULT");
@@ -1223,9 +1234,309 @@ void TestConcurrentTransfers() {
     draw->lpVtbl->Release(draw);
     Check(StatsAre(0, 0, 0, 0), "concurrent transfer test releases registry ownership");
 }
+
+void TestBltSnapshotArguments() {
+    ResetFixtures(); lakefix::ConfigureScalePresenter(nullptr, nullptr, nullptr);
+    FakeDraw real{}; FakeSurface destinationSurface{}, source{};
+    Initialize(real); Initialize(destinationSurface); Initialize(source);
+    auto* draw = Wrap(real);
+    auto* primary = Primary(draw, real, destinationSurface);
+    auto* sourceProxy = Primary(draw, real, source);
+    RECT destination{17, 29, 1041, 797}, crop{3, 5, 101, 203};
+    const RECT originalDestination = destination, originalCrop = crop;
+    DDBLTFX effects{}; effects.dwSize = sizeof(effects); effects.dwDDFX = DDBLTFX_MIRRORLEFTRIGHT;
+    const auto originalEffects = effects;
+    const DWORD flags = DDBLT_WAIT | DDBLT_DDFX;
+    const LONG destinationAdds = destinationSurface.calls[1], sourceAdds = source.calls[1];
+    for (unsigned mode = 0; mode != 4; ++mode) {
+        auto* input = mode & 1 ? sourceProxy : &source.iface;
+        LPRECT inputRect = mode & 2 ? &crop : nullptr;
+        const HRESULT expected = mode & 2 ? E_INVALIDARG : S_FALSE;
+        const DWORD incomingError = 0xa101 + mode;
+        destinationSurface.presentationResult = expected; ClearCalls(destinationSurface);
+        SetLastError(incomingError);
+        const HRESULT result = primary->lpVtbl->Blt(primary, &destination, input, inputRect, flags, &effects);
+        const DWORD returnedError = GetLastError();
+        Check(result == expected && destinationSurface.blts == 1 && !destinationSurface.fills &&
+              LastCall(destinationSurface).destinationPointer == &destination &&
+              LastCall(destinationSurface).source == &source.iface && LastCall(destinationSurface).sourceRect == inputRect &&
+              LastCall(destinationSurface).flags == flags && LastCall(destinationSurface).effects == &effects &&
+              LastCall(destinationSurface).incomingError == incomingError && returnedError == bltError &&
+              SameRect(destination, originalDestination) && SameRect(crop, originalCrop) &&
+              std::memcmp(&effects, &originalEffects, sizeof(effects)) == 0,
+              "Blt snapshot preserves all native/proxy source arguments, native success/failure and LastError");
+        Check(!source.descriptions && !destinationSurface.descriptions && destinationSurface.calls[1] == destinationAdds &&
+              source.calls[1] == sourceAdds && source.references == 1 && destinationSurface.references == 1 &&
+              StatsAre(1, 2, 3, 1), "disabled Blt snapshots neither query dimensions nor acquire hidden native references");
+    }
+    lakefix::ConfigureScalePresenter(Viewport, nullptr, nullptr);
+    const unsigned providers = providerCalls;
+    ClearCalls(destinationSurface); SetLastError(0xa105);
+    Check(primary->lpVtbl->Blt(primary, &destination, sourceProxy, &crop, flags, &effects) == E_INVALIDARG &&
+          destinationSurface.blts == 1 && LastCall(destinationSurface).destinationPointer == &destination &&
+          LastCall(destinationSurface).source == &source.iface && LastCall(destinationSurface).sourceRect == &crop &&
+          LastCall(destinationSurface).flags == flags && LastCall(destinationSurface).effects == &effects &&
+          LastCall(destinationSurface).incomingError == 0xa105 && GetLastError() == bltError &&
+          !source.descriptions && providerCalls == providers,
+          "configured cropped Blt keeps exact proxy-unwrapped pass-through without descriptor/provider calls");
+
+    // Call the known proxy entry point, never an unregistered object's table.
+    // Its source is deliberately unreadable: invalid self must reject before
+    // dereferencing either input or forwarding anything to a native fixture.
+    const auto blt = primary->lpVtbl->Blt;
+    IDirectDrawSurface7 unregistered{};
+    auto* unreadableSource = reinterpret_cast<IDirectDrawSurface7*>(static_cast<UINT_PTR>(1));
+    const LONG nativeBlts = destinationSurface.calls[5];
+    SetLastError(0xa106);
+    Check(blt(&unregistered, &destination, unreadableSource, nullptr, flags, &effects) == E_UNEXPECTED &&
+          GetLastError() == 0xa106 && !unregistered.lpVtbl && destinationSurface.calls[5] == nativeBlts &&
+          !source.descriptions && providerCalls == providers && StatsAre(1, 2, 3, 1),
+          "unknown Blt self is rejected without reading its source, native dispatch or LastError changes");
+    SetLastError(0xa107);
+    Check(blt(nullptr, nullptr, unreadableSource, &crop, flags, &effects) == E_UNEXPECTED &&
+          GetLastError() == 0xa107 && destinationSurface.calls[5] == nativeBlts && StatsAre(1, 2, 3, 1),
+          "null Blt self cannot dispatch or retain any snapshot pins");
+    sourceProxy->lpVtbl->Release(sourceProxy); primary->lpVtbl->Release(primary); draw->lpVtbl->Release(draw);
+    lakefix::ConfigureScalePresenter(nullptr, nullptr, nullptr);
+    Check(StatsAre(0, 0, 0, 0), "Blt argument and invalid-self snapshots release every proxy/context");
+}
+
+struct BltPinObservation {
+    IDirectDrawSurface7* destination = nullptr;
+    IDirectDrawSurface7* source = nullptr;
+    FakeSurface* nativeDestination = nullptr;
+    FakeSurface* nativeSource = nullptr;
+    ULONG destinationRelease = 0, sourceRelease = 0;
+    bool pinsAlive = false, nativesAlive = false;
+} bltPinObservation;
+void ReleaseSnapshotInputsFromBlt(FakeSurface* real) noexcept {
+    real->onBlt = nullptr;
+    const auto destination = bltPinObservation.destination, source = bltPinObservation.source;
+    const bool same = destination == source;
+    bltPinObservation.destinationRelease = destination->lpVtbl->Release(destination);
+    bltPinObservation.sourceRelease = same ? bltPinObservation.destinationRelease : source->lpVtbl->Release(source);
+    bltPinObservation.pinsAlive = StatsAre(1, 0, same ? 2 : 3, 1);
+    bltPinObservation.nativesAlive = bltPinObservation.nativeDestination->references == 1 &&
+        bltPinObservation.nativeSource->references == 1 && !bltPinObservation.nativeDestination->destroyed &&
+        !bltPinObservation.nativeSource->destroyed;
+    SetLastError(0xa210);
+}
+bool SnapshotPinViewport(HWND, LONG, LONG, RECT* full, RECT* fitted) noexcept {
+    *full = *fitted = RECT{40, 50, 840, 650};
+    (void)lakefix::GetScalePresenterStats();
+    SetLastError(0xa211);
+    return true;
+}
+void TestBltSnapshotPins() {
+    for (unsigned mode = 0; mode != 2; ++mode) {
+        const bool same = mode != 0;
+        ResetFixtures(); lakefix::ConfigureScalePresenter(SnapshotPinViewport, nullptr, nullptr);
+        FakeDraw real{}; FakeSurface destinationSurface{}, source{};
+        Initialize(real); Initialize(destinationSurface); if (!same) Initialize(source);
+        auto* draw = Wrap(real);
+        draw->lpVtbl->SetCooperativeLevel(draw, Window(0x4567), DDSCL_NORMAL);
+        auto* primary = Primary(draw, real, destinationSurface);
+        auto* sourceProxy = same ? primary : Primary(draw, real, source);
+        auto& nativeSource = same ? destinationSurface : source;
+        // Metadata pins do NOT own native references. These separate native
+        // references make both reentrant final API Releases valid COM usage.
+        destinationSurface.iface.lpVtbl->AddRef(&destinationSurface.iface);
+        if (!same) source.iface.lpVtbl->AddRef(&source.iface);
+        const LONG destinationAdds = destinationSurface.calls[1], sourceAdds = nativeSource.calls[1];
+        bltPinObservation = {};
+        bltPinObservation.destination = primary; bltPinObservation.source = sourceProxy;
+        bltPinObservation.nativeDestination = &destinationSurface; bltPinObservation.nativeSource = &nativeSource;
+        destinationSurface.onBlt = ReleaseSnapshotInputsFromBlt;
+        RECT destination{11, 13, 1035, 781}; const RECT originalDestination = destination;
+        DDBLTFX effects{}; effects.dwSize = sizeof(effects); effects.dwDDFX = DDBLTFX_MIRRORLEFTRIGHT;
+        const DWORD flags = DDBLT_WAIT | DDBLT_DDFX, incomingError = 0xa201 + mode;
+        SetLastError(incomingError);
+        const HRESULT result = primary->lpVtbl->Blt(primary, &destination, sourceProxy, nullptr, flags, &effects);
+        const DWORD returnedError = GetLastError();
+        Check(bltPinObservation.destinationRelease == 1 && bltPinObservation.sourceRelease == 1 &&
+              bltPinObservation.pinsAlive && bltPinObservation.nativesAlive,
+              "snapshot retains destination and mapped-source metadata across reentrant final API Releases, including self-source");
+        Check(result == S_FALSE && destinationSurface.blts == 1 && !destinationSurface.fills &&
+              SameRect(LastCall(destinationSurface).destination, RECT{40, 50, 840, 650}) &&
+              LastCall(destinationSurface).source == &nativeSource.iface && !LastCall(destinationSurface).sourceRect &&
+              LastCall(destinationSurface).flags == flags && LastCall(destinationSurface).effects == &effects &&
+              LastCall(destinationSurface).incomingError == incomingError && returnedError == bltError &&
+              SameRect(destination, originalDestination) && nativeSource.descriptions == 1 && nativeSource.descriptionSizeCorrect &&
+              destinationSurface.calls[1] == destinationAdds && nativeSource.calls[1] == sourceAdds && StatsAre(1, 0, 1, 1),
+              "returning from native Blt safely drops all snapshot pins without native AddRefs or double-dropping self-source");
+        const ULONG sourceRemaining = same ? 0 : source.iface.lpVtbl->Release(&source.iface);
+        const ULONG destinationRemaining = destinationSurface.iface.lpVtbl->Release(&destinationSurface.iface);
+        Check(!sourceRemaining && !destinationRemaining && destinationSurface.destroyed && nativeSource.destroyed &&
+              StatsAre(1, 0, 1, 1), "independent native references survive snapshot retirement and release exactly once");
+        draw->lpVtbl->Release(draw);
+        lakefix::ConfigureScalePresenter(nullptr, nullptr, nullptr);
+        Check(StatsAre(0, 0, 0, 0), "distinct-source and self-source snapshot retirement leave no proxy/owner leaks");
+    }
+}
+
+constexpr RECT tupleClient{20, 30, 820, 630};
+constexpr RECT tupleOldViewport{120, 30, 720, 630};
+constexpr RECT tupleNewViewport{20, 90, 820, 570};
+struct SnapshotTupleObservation {
+    unsigned descriptions = 0, oldProviders = 0, newProviders = 0;
+    unsigned oldPainters = 0, newPainters = 0, oldLogs = 0, newLogs = 0, oldFallbackLogs = 0, newDimensionsLogs = 0;
+    unsigned oldClips = 0, newClips = 0;
+    bool statsCorrect = true, paintArgumentsCorrect = true;
+    HWND oldWindow = nullptr, newWindow = nullptr;
+    LONG oldWidth = 0, oldHeight = 0, newWidth = 0, newHeight = 0;
+    DWORD oldIncomingError = 0, newIncomingError = 0;
+} tupleObservation;
+bool NewTupleViewport(HWND, LONG, LONG, RECT*, RECT*) noexcept;
+void NewTupleDiagnostic(const wchar_t*) noexcept;
+HWND NewTupleClip(HWND) noexcept;
+bool NewTuplePaint(HWND, const RECT*, UINT) noexcept;
+void ReenterNewTupleConfiguration() noexcept {
+    tupleObservation.statsCorrect = StatsAre(1, 2, 3, 1) && tupleObservation.statsCorrect;
+    lakefix::ConfigureScalePresenter(NewTupleViewport, NewTupleDiagnostic, NewTupleClip, NewTuplePaint);
+    SetLastError(0xa310);
+}
+void ReconfigureFromDescription(FakeSurface* source) noexcept {
+    source->onDescription = nullptr;
+    ++tupleObservation.descriptions;
+    ReenterNewTupleConfiguration();
+}
+bool OldTupleViewport(HWND window, LONG width, LONG height, RECT* full, RECT* fitted) noexcept {
+    ++tupleObservation.oldProviders;
+    tupleObservation.oldWindow = window; tupleObservation.oldWidth = width; tupleObservation.oldHeight = height;
+    tupleObservation.oldIncomingError = GetLastError();
+    *full = tupleClient; *fitted = tupleOldViewport;
+    ReenterNewTupleConfiguration();
+    return true;
+}
+bool NewTupleViewport(HWND window, LONG width, LONG height, RECT* full, RECT* fitted) noexcept {
+    ++tupleObservation.newProviders;
+    tupleObservation.newWindow = window; tupleObservation.newWidth = width; tupleObservation.newHeight = height;
+    tupleObservation.newIncomingError = GetLastError();
+    *full = tupleClient; *fitted = tupleNewViewport;
+    ReenterNewTupleConfiguration();
+    return true;
+}
+void OldTupleDiagnostic(const wchar_t* text) noexcept {
+    ++tupleObservation.oldLogs;
+    if (std::wcsstr(text, L"owned-host GDI letterbox fallback active")) ++tupleObservation.oldFallbackLogs;
+    ReenterNewTupleConfiguration();
+}
+void NewTupleDiagnostic(const wchar_t* text) noexcept {
+    ++tupleObservation.newLogs;
+    if (std::wcsstr(text, L"invalid source dimensions")) ++tupleObservation.newDimensionsLogs;
+    ReenterNewTupleConfiguration();
+}
+HWND OldTupleClip(HWND) noexcept {
+    ++tupleObservation.oldClips;
+    ReenterNewTupleConfiguration();
+    return nullptr;
+}
+HWND NewTupleClip(HWND) noexcept {
+    ++tupleObservation.newClips;
+    ReenterNewTupleConfiguration();
+    return nullptr;
+}
+bool CheckTuplePaint(HWND window, const RECT* strips, UINT count, const RECT& fitted) noexcept {
+    const RECT expected[] = {
+        {tupleClient.left, tupleClient.top, tupleClient.right, fitted.top},
+        {tupleClient.left, fitted.bottom, tupleClient.right, tupleClient.bottom},
+        {tupleClient.left, fitted.top, fitted.left, fitted.bottom},
+        {fitted.right, fitted.top, tupleClient.right, fitted.bottom}
+    };
+    bool correct = window == Window(0x6789) && strips && count == ARRAYSIZE(expected);
+    if (correct) for (UINT index = 0; index != count; ++index) correct = SameRect(strips[index], expected[index]) && correct;
+    tupleObservation.paintArgumentsCorrect = correct && tupleObservation.paintArgumentsCorrect;
+    ReenterNewTupleConfiguration();
+    return correct;
+}
+bool OldTuplePaint(HWND window, const RECT* strips, UINT count) noexcept {
+    ++tupleObservation.oldPainters;
+    return CheckTuplePaint(window, strips, count, tupleOldViewport);
+}
+bool NewTuplePaint(HWND window, const RECT* strips, UINT count) noexcept {
+    ++tupleObservation.newPainters;
+    return CheckTuplePaint(window, strips, count, tupleNewViewport);
+}
+void TestBltSnapshotConfiguration() {
+    ResetFixtures(); tupleObservation = {};
+    lakefix::ConfigureScalePresenter(OldTupleViewport, OldTupleDiagnostic, OldTupleClip, OldTuplePaint);
+    FakeDraw real{}; FakeSurface destinationSurface{}, source{};
+    Initialize(real); Initialize(destinationSurface); Initialize(source);
+    auto* draw = Wrap(real);
+    draw->lpVtbl->SetCooperativeLevel(draw, Window(0x6789), DDSCL_NORMAL);
+    auto* primary = Primary(draw, real, destinationSurface);
+    auto* sourceProxy = Primary(draw, real, source);
+    source.onDescription = ReconfigureFromDescription;
+    destinationSurface.fillResult = DDERR_EXCEPTION;
+    RECT destination{7, 11, 1031, 779}; const RECT originalDestination = destination;
+    DDBLTFX effects{}; effects.dwSize = sizeof(effects); effects.dwDDFX = DDBLTFX_MIRRORLEFTRIGHT;
+    const DWORD flags = DDBLT_WAIT | DDBLT_DDFX;
+    SetLastError(0xa301);
+    const HRESULT firstResult = primary->lpVtbl->Blt(primary, &destination, sourceProxy, nullptr, flags, &effects);
+    const DWORD firstError = GetLastError();
+    Check(tupleObservation.descriptions == 1 && tupleObservation.oldProviders == 1 && !tupleObservation.newProviders &&
+          tupleObservation.oldWindow == Window(0x6789) && tupleObservation.oldWidth == 1024 && tupleObservation.oldHeight == 768 &&
+          tupleObservation.oldIncomingError == 0xa301 && source.incomingDescriptionError == 0xa301,
+          "Blt snapshots its old provider before native GetSurfaceDesc and provider callbacks reconfigure the tuple");
+    Check(tupleObservation.oldPainters == 1 && !tupleObservation.newPainters && tupleObservation.oldLogs >= 1 &&
+          tupleObservation.oldFallbackLogs == 1 && !tupleObservation.newLogs && !tupleObservation.oldClips && !tupleObservation.newClips &&
+          tupleObservation.statsCorrect && tupleObservation.paintArgumentsCorrect,
+          "current Blt keeps a coherent old painter/logger tuple while native, provider, painter and logger callbacks reenter configuration");
+    Check(firstResult == S_FALSE && firstError == bltError && destinationSurface.blts == 2 && destinationSurface.fills == 1 &&
+          SameRect(LastCall(destinationSurface).destination, tupleOldViewport) && LastCall(destinationSurface).source == &source.iface &&
+          !LastCall(destinationSurface).sourceRect && LastCall(destinationSurface).flags == flags &&
+          LastCall(destinationSurface).effects == &effects && LastCall(destinationSurface).incomingError == 0xa301 &&
+          SameRect(destination, originalDestination) && source.descriptions == 1 && source.descriptionSizeCorrect,
+          "reentrant tuple changes preserve the old call's geometry, fresh source description, native result and LastError");
+
+    // Existing fallback fixtures use no logger; its one-shot activation above
+    // identifies the old logger. The reserved dimensions warning now identifies
+    // the replacement logger on the very next Blt, not merely a later forwarder.
+    const unsigned oldLogs = tupleObservation.oldLogs;
+    source.width = 0; destinationSurface.presentationResult = E_INVALIDARG;
+    ClearCalls(destinationSurface); SetLastError(0xa302);
+    const HRESULT bypassResult = primary->lpVtbl->Blt(primary, &destination, sourceProxy, nullptr, flags, &effects);
+    const DWORD bypassError = GetLastError();
+    Check(bypassResult == E_INVALIDARG && bypassError == bltError && destinationSurface.blts == 1 && !destinationSurface.fills &&
+          LastCall(destinationSurface).destinationPointer == &destination && LastCall(destinationSurface).source == &source.iface &&
+          !LastCall(destinationSurface).sourceRect && LastCall(destinationSurface).flags == flags &&
+          LastCall(destinationSurface).effects == &effects && LastCall(destinationSurface).incomingError == 0xa302 &&
+          source.incomingDescriptionError == 0xa302 && source.descriptions == 2 && source.descriptionSizeCorrect &&
+          !tupleObservation.newProviders && !tupleObservation.newPainters,
+          "next Blt freshly observes invalid dimensions and keeps exact native fallback arguments/HRESULT/LastError");
+    Check(tupleObservation.newLogs == 1 && tupleObservation.newDimensionsLogs == 1 && tupleObservation.oldLogs == oldLogs &&
+          tupleObservation.descriptions == 1 && tupleObservation.statsCorrect,
+          "the very next Blt uses the replacement snapshot logger, which also reenters configuration without a registry lock");
+
+    source.width = 1600; source.height = 900; destinationSurface.presentationResult = E_ACCESSDENIED;
+    ClearCalls(destinationSurface); SetLastError(0xa303);
+    const HRESULT replacementResult = primary->lpVtbl->Blt(primary, &destination, sourceProxy, nullptr, flags, &effects);
+    const DWORD replacementError = GetLastError();
+    Check(tupleObservation.descriptions == 1 && tupleObservation.oldProviders == 1 && tupleObservation.newProviders == 1 &&
+          tupleObservation.oldPainters == 1 && tupleObservation.newPainters == 1 && tupleObservation.newWindow == Window(0x6789) &&
+          tupleObservation.newWidth == 1600 && tupleObservation.newHeight == 900 && tupleObservation.newIncomingError == 0xa303 &&
+          source.incomingDescriptionError == 0xa303 && source.descriptions == 3 && source.descriptionSizeCorrect,
+          "next valid Blt samples the replacement provider/painter and freshly changed dimensions, never a cached prior snapshot");
+    Check(replacementResult == E_ACCESSDENIED && replacementError == bltError && destinationSurface.blts == 1 && !destinationSurface.fills &&
+          SameRect(LastCall(destinationSurface).destination, tupleNewViewport) && LastCall(destinationSurface).source == &source.iface &&
+          !LastCall(destinationSurface).sourceRect && LastCall(destinationSurface).flags == flags &&
+          LastCall(destinationSurface).effects == &effects && LastCall(destinationSurface).incomingError == 0xa303 &&
+          SameRect(destination, originalDestination) && tupleObservation.statsCorrect && tupleObservation.paintArgumentsCorrect &&
+          !source.calls[1] && !destinationSurface.calls[1],
+          "replacement snapshot remains reentrant and returns the actual native failure without hidden native lifetime changes");
+    SetLastError(0xa304);
+    Check(primary->lpVtbl->SetClipper(primary, nullptr) == S_OK && tupleObservation.newClips == 1 && !tupleObservation.oldClips &&
+          !destinationSurface.seenClipper && destinationSurface.incomingClipperError == 0xa304 && GetLastError() == nativeError &&
+          tupleObservation.statsCorrect, "subsequent clipper dispatch also observes the replacement tuple outside the registry lock");
+    sourceProxy->lpVtbl->Release(sourceProxy); primary->lpVtbl->Release(primary); draw->lpVtbl->Release(draw);
+    lakefix::ConfigureScalePresenter(nullptr, nullptr, nullptr);
+    Check(StatsAre(0, 0, 0, 0), "reentrant tuple snapshots release all proxy allocations and owner contexts");
+}
 } // namespace
 
 int wmain() {
+    Check(lakefix::profile::Initialize() == lakefix::profile::kEnabled,
+          "presenter exercises the selected profiling mode after explicit initialization");
     const auto drawTable = *NativeDrawTable(); const auto surfaceTable = *NativeSurfaceTable();
     const auto clipperTable = *NativeClipperTable();
     static_assert(sizeof(drawTable) == 30 * sizeof(void*), "DD7 completeness");
@@ -1234,6 +1545,7 @@ int wmain() {
     TestNativeIdentityAndTransfer(); TestAllForwardersAndArguments(); TestForwarderLoggingConfiguration();
     TestPresentationAndClipping();
     TestSurfaceIndependentLifetime(); TestLetterboxFallback(); TestReentrancyAndReuse(); TestBounds(); TestConcurrentTransfers();
+    TestBltSnapshotArguments(); TestBltSnapshotPins(); TestBltSnapshotConfiguration();
     lakefix::ConfigureScalePresenter(nullptr, nullptr, nullptr);
     Check(!badNativeThis && !badNativeArguments, "every native fake received real this, original table and native interface arguments");
     Check(std::memcmp(&drawTable, NativeDrawTable(), sizeof(drawTable)) == 0 &&

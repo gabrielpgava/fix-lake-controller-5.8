@@ -5,11 +5,16 @@ param(
     [string]$ZigPath = 'zig.exe',
     [string]$MinGWCompiler = 'i686-w64-mingw32-g++.exe',
     [string]$OutputDirectory = 'dist',
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [string]$BuildDirectory,
+    [switch]$EnableProfiling
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-$build = Join-Path $root "build-$($Toolchain.ToLowerInvariant())"
+if (!$BuildDirectory) { $BuildDirectory = "build-$($Toolchain.ToLowerInvariant())"; if ($EnableProfiling) { $BuildDirectory += '-profile' } }
+$build = if ([System.IO.Path]::IsPathRooted($BuildDirectory)) { $BuildDirectory } else { Join-Path $root $BuildDirectory }
+$build = [System.IO.Path]::GetFullPath($build)
+if ($EnableProfiling -and !$PSBoundParameters.ContainsKey('OutputDirectory')) { $OutputDirectory = 'dist-profile' }
 $dist = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) { $OutputDirectory } else { Join-Path $root $OutputDirectory }
 $dist = [System.IO.Path]::GetFullPath($dist)
 New-Item -ItemType Directory -Path $build, $dist -Force | Out-Null
@@ -25,7 +30,9 @@ if ($Toolchain -eq 'Zig') {
     $common = @('c++', '-target', 'x86-windows-gnu', '-std=c++17', '-DUNICODE', '-D_UNICODE',
                 '-D_WIN32_WINNT=0x0a00', '-Wall', '-Wextra', '-Wpedantic')
     if ($Configuration -eq 'Release') { $common += '-O2' } else { $common += @('-O0', '-g') }
-    Invoke-Checked $zig ($common + @('-shared', (Join-Path $root 'src/fix.cpp'), (Join-Path $root 'src/ddraw_scale.cpp'),
+    $runtimeFlags = @()
+    if ($EnableProfiling) { $runtimeFlags += @('-DLAKE_ENABLE_PROFILING=1','-fno-emulated-tls') }
+    Invoke-Checked $zig ($common + $runtimeFlags + @('-shared', (Join-Path $root 'src/fix.cpp'), (Join-Path $root 'src/ddraw_scale.cpp'), (Join-Path $root 'src/profile.cpp'),
         (Join-Path $root 'src/fix.def'), '-luser32', '-lcomctl32', '-lgdi32', '-o', (Join-Path $build 'LakeWindowedFix.dll')))
     Invoke-Checked $zig ($common + @((Join-Path $root 'src/launcher.cpp'), '-lbcrypt', '-municode',
         '-o', (Join-Path $build 'LakeWindowedLauncher.exe')))
@@ -34,28 +41,38 @@ if ($Toolchain -eq 'Zig') {
             '-municode', '-o', (Join-Path $build 'LakeFixScaleGeometryTest.exe')))
         Invoke-Checked $zig ($common + @((Join-Path $root 'tests/ui_quality_test.cpp'),
             '-municode', '-o', (Join-Path $build 'LakeFixUiQualityTest.exe')))
-        Invoke-Checked $zig ($common + @((Join-Path $root 'tests/presenter_test.cpp'), (Join-Path $root 'src/ddraw_scale.cpp'),
+        Invoke-Checked $zig ($common + $runtimeFlags + @((Join-Path $root 'tests/presenter_test.cpp'), (Join-Path $root 'src/ddraw_scale.cpp'), (Join-Path $root 'src/profile.cpp'),
             '-luser32', '-municode', '-o', (Join-Path $build 'LakeFixPresenterTest.exe')))
+        Invoke-Checked $zig ($common + @((Join-Path $root 'tests/profile_test.cpp'), (Join-Path $root 'src/profile.cpp'),
+            '-municode', '-o', (Join-Path $build 'LakeFixProfileDisabledTest.exe')))
+        Invoke-Checked $zig ($common + @('-DLAKE_ENABLE_PROFILING=1', '-fno-emulated-tls', (Join-Path $root 'tests/profile_test.cpp'), (Join-Path $root 'src/profile.cpp'),
+            '-municode', '-o', (Join-Path $build 'LakeFixProfileEnabledTest.exe')))
         Invoke-Checked (Join-Path $build 'LakeFixScaleGeometryTest.exe') @()
         Invoke-Checked (Join-Path $build 'LakeFixUiQualityTest.exe') @()
         Invoke-Checked (Join-Path $build 'LakeFixPresenterTest.exe') @()
+        Invoke-Checked (Join-Path $build 'LakeFixProfileDisabledTest.exe') @()
+        Invoke-Checked (Join-Path $build 'LakeFixProfileEnabledTest.exe') @()
         & (Join-Path $root 'tests/Resource-Metrics.Test.ps1')
+        & (Join-Path $root 'tests/Build-Options.Test.ps1')
         Invoke-Checked $zig ($common + @('-shared', (Join-Path $root 'tests/renderer_fixture.cpp'),
             '-luser32', '-lgdi32', '-o', (Join-Path $build 'Contour.dll')))
         Invoke-Checked $zig ($common + @((Join-Path $root 'tests/fixture.cpp'), '-luser32', '-lgdi32', '-municode',
             '-o', (Join-Path $build 'LakeFixFixture.exe')))
         Invoke-Checked $zig ($common + @((Join-Path $root 'src/launcher.cpp'), '-DLAKE_FIX_TESTING',
             '-lbcrypt', '-municode', '-o', (Join-Path $build 'LakeFixInjectionTest.exe')))
-        & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 0
-        & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 1
-        & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 0 -ExpectedExit 23
-        & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 0 -ScaleRendering
+        $profilingValue = if ($EnableProfiling) { '1' } else { '0' }
+        & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 0 -Profiling $profilingValue
+        & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 1 -Profiling $profilingValue
+        & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 0 -ExpectedExit 23 -Profiling $profilingValue
+        & (Join-Path $root 'tests/Run-Fixture.ps1') -BinaryDirectory $build -NativeResize 0 -ScaleRendering -Profiling $profilingValue
     }
     Copy-Item (Join-Path $build 'LakeWindowedFix.dll'), (Join-Path $build 'LakeWindowedLauncher.exe') $dist
 } else {
     $cmake = (Get-Command cmake.exe -ErrorAction Stop).Source
     $testFlag = if ($SkipTests) { 'OFF' } else { 'ON' }
     $options = @('-S', $root, '-B', $build, "-DBUILD_TESTING=$testFlag")
+    $profileFlag = if ($EnableProfiling) { 'ON' } else { 'OFF' }
+    $options += "-DLAKE_ENABLE_PROFILING=$profileFlag"
     if ($Toolchain -eq 'MSVC') {
         $options += @('-G', 'Visual Studio 17 2022', '-A', 'Win32')
     } else {
@@ -76,3 +93,4 @@ if (!(Test-Path $ini)) { Copy-Item (Join-Path $root 'config/LakeWindowedFix.ini'
 Copy-Item (Join-Path $root 'LICENSE') $dist
 Copy-Item (Join-Path $root 'scripts/Measure-LakeResources.ps1'), (Join-Path $root 'scripts/LakeResourceMetrics.psm1') $dist
 Write-Host "Build x86 disponivel em $dist"
+if ($EnableProfiling) { Write-Host 'DIAGNOSTIC BUILD: QPC profiling enabled; not a production benchmark or installer payload.' }

@@ -1,5 +1,11 @@
 # Lake Controller Windowed Fix
 
+## Candidata de desenvolvimento — otimizações adicionais
+
+Uma revisão local reduz consultas repetidas do cursor e reúne o snapshot do presenter sob um único lock de leitura, mantendo lifetime/erros nativos. Acrescenta `make profile`, um build de diagnóstico separado e opcional, desativado no runtime normal. Não inicia o Lake e não altera o INI, atalhos ou binários proprietários. **Ainda não há ganho adicional de FPS/CPU ou correção de leak comprovados.** Implementação, builds isolados e limites em [docs/OPTIMIZATION.md](docs/OPTIMIZATION.md).
+
+Os builds finais normal (`dist-next/`) e diagnóstico (`dist-profile-v0.6.0/`) passaram em **1.487 verificações cada, sem falhas nem warnings**. A distribuição 0.6 anterior foi preservada; não houve instalação nem novo ensaio com o Lake real.
+
 ## Instalação simples — instalador nativo
 
 Para o usuário final, o fluxo é **duplo clique no `LakeWindowedFix-Setup-v0.6.0.exe` do pacote de release > Instalar > atalho Lake Controller - Janela**. Detecta o Lake compatível, instala apenas no perfil do usuário e cria os atalhos, sem comandos ou edição manual de INI. O Lake original precisa estar instalado e não é substituído.

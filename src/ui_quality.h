@@ -99,6 +99,43 @@ inline void ReleaseCursorVisibility(unsigned& credits, Adjust adjust) noexcept {
     }
 }
 
+struct CursorVisibilitySample {
+    CURSORINFO info{};
+    bool queried = false;
+    bool adjusted = false;
+};
+
+// One call-local observation only. Never reuse after returning to the message
+// pump. Ordinary WM_SETCURSOR callers do not need a second visibility query.
+template<class Query, class Adjust>
+inline CursorVisibilitySample EnsureCursorVisibility(unsigned& credits, Query query, Adjust adjust) noexcept {
+    const DWORD saved = GetLastError();
+    CursorVisibilitySample sample;
+    sample.info.cbSize = sizeof(sample.info);
+    sample.queried = query(&sample.info) != FALSE;
+    if (sample.queried && !(sample.info.flags & CURSOR_SHOWING)) {
+        sample.adjusted = true; // Also recheck when the bounded credit cap is hit.
+        AcquireCursorVisibility(credits, adjust);
+    }
+    SetLastError(saved);
+    return sample;
+}
+
+template<class Query>
+inline bool ConfirmSystemCursor(const CursorVisibilitySample& sample, HCURSOR expected, Query query) noexcept {
+    if (!expected) return false;
+    if (sample.queried && !sample.adjusted && (sample.info.flags & CURSOR_SHOWING) &&
+        sample.info.hCursor == expected) return true;
+    // Failed/suppressed/unexpected samples and every recovery attempt retain
+    // the original post-recovery verification before hiding the native sprite.
+    const DWORD saved = GetLastError();
+    CURSORINFO info{};
+    info.cbSize = sizeof(info);
+    const bool visible = query(&info) && (info.flags & CURSOR_SHOWING) && info.hCursor == expected;
+    SetLastError(saved);
+    return visible;
+}
+
 // Keep a valid sprite rectangle, but outside the fixed canvas. The native
 // drawing helper still runs and clips it; no COM HRESULT is invented. Decline
 // unexpected or large rectangles rather than risking an unbounded conversion.

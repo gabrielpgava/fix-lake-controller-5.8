@@ -14,11 +14,13 @@ Estes comandos sao para **desenvolvedores**. O operador baixa o instalador e usa
 make help
 make build
 make test
+make profile
 make installer
 make package
 ```
 
-- `build` compila o runtime x86 e executa suas oito suites; `test` e um alias para esse build testado.
+- `build` compila o runtime x86 e executa as suites de regressao, incluindo profiling habilitado/desabilitado; `test` e um alias para esse build testado. As oito suites/1.159 verificacoes documentadas anteriormente pertencem a baseline historica.
+- `profile` compila/testa somente um runtime de diagnostico separado em `dist-profile-v0.6.0/`, com intermediarios em `build-zig-profile/`. Nao inicia o Lake, instala ou publica nada. O fluxo normal build/package deixa profiling desligado. Veja [OPTIMIZATION.md](OPTIMIZATION.md).
 - `installer` tambem compila e testa o instalador nativo em pastas sinteticas, sem instalar no perfil real.
 - `package` tambem gera os arquivos de distribuicao por uma lista fechada de nomes. Nunca inclui a pasta inteira de build/dist, logs, dumps, presets, ferramentas, evidencias privadas ou binarios proprietarios.
 - Depois do empacotamento, executa **17 testes das guardas de publicacao**, com Git e GitHub simulados: nenhuma tag, release ou chamada remota real e feita pelos testes. Incluem arvore suja, hashes/checksums/ZIP alterados, metadados privados inesperados, URLs divergentes e tags conflitantes.

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('Help','Build','Installer','Package')][string]$Target = 'Help',
+    [ValidateSet('Help','Build','Profile','Installer','Package')][string]$Target = 'Help',
     [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.6.0',
     [AllowEmptyString()][string]$ZigPath = 'auto'
 )
@@ -12,6 +12,7 @@ if ($Target -eq 'Help') {
 GNU Make / Windows - developer commands (end users only run the Setup EXE)
   make build          Build x86 runtime and run all runtime tests
   make test           Same tested build
+  make profile        Build/test a SEPARATE diagnostic runtime; no Lake launch
   make installer      Build/test runtime and the native per-user Setup EXE
   make package        Produce installer, portable ZIP, checksums and manifest
   make release-check  Build/package and validate release, without publishing
@@ -28,13 +29,16 @@ $match = [regex]::Match($cmake,'project\(lake_controller_windowed_fix VERSION ([
 if (!$match.Success -or $match.Groups[1].Value -ne $Version) { throw 'VERSION must match the project version in CMakeLists.txt.' }
 $runtime = Join-Path $root "dist-release-v$Version"
 $setup = Join-Path $root "dist-setup-v$Version"
-if ($Target -in @('Build','Installer')) {
+if ($Target -in @('Build','Profile','Installer')) {
     . (Join-Path $PSScriptRoot 'Resolve-Zig.ps1')
     $zig = Get-LakeZigPath -Requested $ZigPath
 }
 switch ($Target) {
     'Build' {
         & (Join-Path $PSScriptRoot 'Build.ps1') -Toolchain Zig -Configuration Release -ZigPath $zig -OutputDirectory $runtime
+    }
+    'Profile' {
+        & (Join-Path $PSScriptRoot 'Build.ps1') -Toolchain Zig -Configuration Release -ZigPath $zig -EnableProfiling -OutputDirectory (Join-Path $root "dist-profile-v$Version")
     }
     'Installer' {
         & (Join-Path $PSScriptRoot 'Build-Installer.ps1') -RuntimeDirectory $runtime -OutputDirectory $setup -ZigPath $zig

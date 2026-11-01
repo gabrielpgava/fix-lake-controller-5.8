@@ -2,6 +2,7 @@
 #define NOMINMAX
 #define CINTERFACE
 #include "ddraw_scale.h"
+#include "profile.h"
 #include <ddraw.h>
 #include <atomic>
 #include <cstddef>
@@ -130,8 +131,7 @@ DrawProxy*& ProxyList(DrawProxy*) noexcept { return draws; }
 SurfaceProxy*& ProxyList(SurfaceProxy*) noexcept { return surfaces; }
 
 template<class Proxy>
-Proxy* FindProxy(typename Proxy::Interface* self) noexcept {
-    AcquireSRWLockShared(&registryLock);
+Proxy* FindProxyLocked(typename Proxy::Interface* self) noexcept {
     Proxy* found = nullptr;
     for (auto* entry = ProxyList(static_cast<Proxy*>(nullptr)); entry; entry = entry->next) {
         if (&entry->iface == self) {
@@ -140,6 +140,13 @@ Proxy* FindProxy(typename Proxy::Interface* self) noexcept {
             break;
         }
     }
+    return found;
+}
+
+template<class Proxy>
+Proxy* FindProxy(typename Proxy::Interface* self) noexcept {
+    AcquireSRWLockShared(&registryLock);
+    auto* found = FindProxyLocked<Proxy>(self);
     ReleaseSRWLockShared(&registryLock);
     return found;
 }
@@ -230,10 +237,9 @@ struct UnwrapScope {
             DropProxy(held[index].surface);
         }
     }
-    void* Lookup(const void* input) noexcept {
+    void* LookupLocked(const void* input) noexcept {
         if (!input) return nullptr;
         void* result = const_cast<void*>(input);
-        AcquireSRWLockShared(&registryLock);
         for (auto* entry = draws; entry; entry = entry->next) {
             if (&entry->iface == input) {
                 entry->holds.fetch_add(1, std::memory_order_relaxed);
@@ -252,6 +258,12 @@ struct UnwrapScope {
                 }
             }
         }
+        return result;
+    }
+    void* Lookup(const void* input) noexcept {
+        if (!input) return nullptr;
+        AcquireSRWLockShared(&registryLock);
+        void* result = LookupLocked(input);
         ReleaseSRWLockShared(&registryLock);
         return result;
     }
@@ -267,6 +279,29 @@ struct UnwrapScope {
             return (value);
         }
     }
+};
+
+// Capture identities/pins and the callback tuple at one registry read point.
+// No native pointers are dereferenced, and no COM/callback/destructor runs
+// while holding the lock. Source pins are dropped before the destination pin,
+// just as in the separate FindProxy + UnwrapScope path.
+struct PresentationSnapshot {
+    Pin<SurfaceProxy> destination{nullptr};
+    UnwrapScope inputs;
+    IDirectDrawSurface7* source = nullptr;
+    Configuration config{};
+    PresentationSnapshot(IDirectDrawSurface7* self, IDirectDrawSurface7* input) noexcept {
+        [[maybe_unused]] profile::Scope timing(profile::Metric::PresenterSnapshot);
+        AcquireSRWLockShared(&registryLock);
+        destination.value = FindProxyLocked<SurfaceProxy>(self);
+        if (destination.value) {
+            source = static_cast<IDirectDrawSurface7*>(inputs.LookupLocked(input));
+            config = {viewportProvider, presenterLog, clipWindowProvider, letterboxPainter};
+        }
+        ReleaseSRWLockShared(&registryLock);
+    }
+    PresentationSnapshot(const PresentationSnapshot&) = delete;
+    PresentationSnapshot& operator=(const PresentationSnapshot&) = delete;
 };
 
 // Signature deduction preserves every SDK stdcall argument and return type.
@@ -509,11 +544,20 @@ HRESULT STDMETHODCALLTYPE SurfaceSetClipper(IDirectDrawSurface7* self, LPDIRECTD
 HRESULT CallBlt(SurfaceProxy* proxy, LPRECT destination, LPDIRECTDRAWSURFACE7 source,
                 LPRECT sourceRect, DWORD flags, LPDDBLTFX effects, LastErrorState& error,
                 ScalePresenterLog log, const wchar_t* operation) noexcept {
-    error.Restore();
-    const HRESULT result = proxy->real->lpVtbl->Blt(proxy->real, destination, source, sourceRect, flags, effects);
-    error.Capture();
+    HRESULT result;
+    {
+        [[maybe_unused]] profile::Scope timing(profile::Metric::NativeBlt);
+        error.Restore();
+        result = proxy->real->lpVtbl->Blt(proxy->real, destination, source, sourceRect, flags, effects);
+        error.Capture();
+    }
     LogFailure(log, operation, result);
     return result;
+}
+
+bool CallPainter(ScaleLetterboxPainter painter, HWND window, const RECT* strips, UINT count) noexcept {
+    [[maybe_unused]] profile::Scope timing(profile::Metric::LetterboxPaint);
+    return painter(window, strips, count);
 }
 
 struct PresentationScope {
@@ -525,22 +569,27 @@ struct PresentationScope {
 HRESULT STDMETHODCALLTYPE SurfaceBlt(IDirectDrawSurface7* self, LPRECT destination,
                                      LPDIRECTDRAWSURFACE7 source, LPRECT sourceRect,
                                      DWORD flags, LPDDBLTFX effects) {
+    [[maybe_unused]] profile::Scope timing(profile::Metric::SurfaceBlt);
     LastErrorState error;
-    Pin<SurfaceProxy> proxy(FindProxy<SurfaceProxy>(self));
-    if (!proxy.value) return E_UNEXPECTED;
-    UnwrapScope inputs;
-    auto* realSource = inputs.Map(source);
-    const auto config = GetConfiguration();
+    PresentationSnapshot snapshot(self, source);
+    auto* proxy = snapshot.destination.value;
+    if (!proxy) return E_UNEXPECTED;
+    auto* realSource = snapshot.source;
+    const auto config = snapshot.config;
     PresentationScope scope;
     const auto forward = [&]() noexcept {
-        InvalidateGeometry(proxy.value);
-        return CallBlt(proxy.value, destination, realSource, sourceRect, flags, effects, error, config.log, L"Blt");
+        InvalidateGeometry(proxy);
+        return CallBlt(proxy, destination, realSource, sourceRect, flags, effects, error, config.log, L"Blt");
     };
     if (scope.nested || !realSource || sourceRect || !config.provider) return forward();
     DDSURFACEDESC2 description{};
     description.dwSize = sizeof(description);
-    error.Restore();
-    const HRESULT described = realSource->lpVtbl->GetSurfaceDesc(realSource, &description);
+    HRESULT described;
+    {
+        [[maybe_unused]] profile::Scope descriptionTiming(profile::Metric::SurfaceDescription);
+        error.Restore();
+        described = realSource->lpVtbl->GetSurfaceDesc(realSource, &description);
+    }
     if (FAILED(described)) {
         LogDescriptionFailure(config.log, described);
         return forward();
@@ -556,14 +605,19 @@ HRESULT STDMETHODCALLTYPE SurfaceBlt(IDirectDrawSurface7* self, LPRECT destinati
     const HWND window = proxy->owner->window.load(std::memory_order_acquire);
     RECT full{};
     RECT fitted{};
-    error.Restore();
-    if (!config.provider(window, width, height, &full, &fitted)) return forward();
+    bool provided;
+    {
+        [[maybe_unused]] profile::Scope viewportTiming(profile::Metric::Viewport);
+        error.Restore();
+        provided = config.provider(window, width, height, &full, &fitted);
+    }
+    if (!provided) return forward();
     if (!window || !ValidViewport(full, fitted)) {
         LogOnce(config.log, badViewportLogged, L"Scaled presentation bypassed: invalid owner viewport");
         return forward();
     }
     const DWORD callerError = error.value;
-    if (NeedLetterbox(proxy.value, window, full, fitted)) {
+    if (NeedLetterbox(proxy, window, full, fitted)) {
         RECT strips[] = {
             {full.left, full.top, full.right, fitted.top},
             {full.left, fitted.bottom, full.right, full.bottom},
@@ -574,7 +628,7 @@ HRESULT STDMETHODCALLTYPE SurfaceBlt(IDirectDrawSurface7* self, LPRECT destinati
         // painter. The real image Blt below still decides success/geometry.
         bool painted = !HasArea(strips[0]) && !HasArea(strips[1]) && !HasArea(strips[2]) && !HasArea(strips[3]);
         if (!painted && proxy->fallbackFill.load() && config.painter)
-            painted = config.painter(window, strips, ARRAYSIZE(strips));
+            painted = CallPainter(config.painter, window, strips, ARRAYSIZE(strips));
         DDBLTFX fill{};
         fill.dwSize = sizeof(fill);
         fill.dwFillColor = 0;
@@ -582,28 +636,28 @@ HRESULT STDMETHODCALLTYPE SurfaceBlt(IDirectDrawSurface7* self, LPRECT destinati
             if (painted) break;
             if (!HasArea(strip)) continue;
             error.value = callerError;
-            const HRESULT result = CallBlt(proxy.value, &strip, nullptr, nullptr,
+            const HRESULT result = CallBlt(proxy, &strip, nullptr, nullptr,
                                            DDBLT_COLORFILL | DDBLT_WAIT, &fill, error, config.log, L"letterbox Blt");
             if (FAILED(result)) {
-                if (config.painter && config.painter(window, strips, ARRAYSIZE(strips))) {
+                if (config.painter && CallPainter(config.painter, window, strips, ARRAYSIZE(strips))) {
                     proxy->fallbackFill.store(true);
                     painted = true;
                     LogOnce(config.log, fallbackLogged,
                         L"Primary COLORFILL unavailable: owned-host GDI letterbox fallback active; presentation HRESULT remains real");
                     break;
                 }
-                InvalidateGeometry(proxy.value);
+                InvalidateGeometry(proxy);
                 return result;
             }
         }
     }
     error.value = callerError;
-    const HRESULT result = CallBlt(proxy.value, &fitted, realSource, nullptr, flags, effects,
+    const HRESULT result = CallBlt(proxy, &fitted, realSource, nullptr, flags, effects,
                                    error, config.log, L"presentation Blt");
     if (SUCCEEDED(result)) {
-        RememberGeometry(proxy.value, window, full, fitted);
+        RememberGeometry(proxy, window, full, fitted);
         LogActive(config.log, width, height, fitted);
-    } else InvalidateGeometry(proxy.value);
+    } else InvalidateGeometry(proxy);
     return result;
 }
 

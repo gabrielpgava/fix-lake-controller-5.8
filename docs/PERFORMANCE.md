@@ -1,5 +1,7 @@
 # Performance e usabilidade — candidata 0.6
 
+> A revisão de desenvolvimento posterior, com snapshot conjunto, consulta de cursor reaproveitada e profiling opcional, está documentada em [OPTIMIZATION.md](OPTIMIZATION.md). As medições abaixo pertencem à 0.6 histórica; não comprovam ganhos da revisão nova.
+
 **Implementada, com validação limitada em OFFLINE.** Mantém o renderer original, o canvas **1088×612**, a janela inicial **1024×576 lógica** e **32 bits de cor**. A saída nova é **`dist-v0.6/`**; não substitui as distribuições 0.3/0.4/0.5. Não é promessa de 60 FPS nem correção comprovada de vazamento de memória.
 
 ## Alterações implementadas

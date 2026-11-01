@@ -5,7 +5,7 @@ ZIG ?= auto
 GH ?= gh.exe
 POWERSHELL ?= powershell.exe
 
-.PHONY: help build test installer package release-check release release-draft
+.PHONY: help build test profile installer package release-check release release-draft
 
 help:
 	"$(POWERSHELL)" -NoProfile -File scripts/Make.ps1 -Target Help
@@ -14,6 +14,9 @@ build:
 	"$(POWERSHELL)" -NoProfile -File scripts/Make.ps1 -Target Build -Version "$(VERSION)" -ZigPath "$(ZIG)"
 
 test: build
+
+profile:
+	"$(POWERSHELL)" -NoProfile -File scripts/Make.ps1 -Target Profile -Version "$(VERSION)" -ZigPath "$(ZIG)"
 
 installer: build
 	"$(POWERSHELL)" -NoProfile -File scripts/Make.ps1 -Target Installer -Version "$(VERSION)" -ZigPath "$(ZIG)"

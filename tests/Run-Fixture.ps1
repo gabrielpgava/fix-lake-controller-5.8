@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)][string]$BinaryDirectory,
     [ValidateSet('0', '1')][string]$NativeResize = '0',
     [int]$ExpectedExit = -1,
-    [switch]$ScaleRendering
+    [switch]$ScaleRendering,
+    [ValidateSet('0', '1')][string]$Profiling = '0'
 )
 $ErrorActionPreference = 'Stop'
 if ($ExpectedExit -lt -1 -or $ExpectedExit -gt 255) { throw 'ExpectedExit invalido.' }
@@ -41,5 +42,30 @@ foreach ($case in $cases) {
     Write-Host "Synthetic fixture $($case.Name): ScaleRendering=$scaleValue NativeResize=$NativeResize ExpectedExit=$ExpectedExit"
     & (Join-Path $run 'LakeFixInjectionTest.exe') @arguments
     if ($LASTEXITCODE -ne 0) { throw "Fixture falhou (exit $LASTEXITCODE). Logs em $run\logs" }
+    $runtimeLogs = @(Get-ChildItem -LiteralPath (Join-Path $run 'logs') -File | Where-Object { $_.Name -match '^LakeWindowedFix-[0-9]+\.log$' })
+    if ($runtimeLogs.Count -ne 1) { throw 'Fixture must produce exactly one owned runtime log.' }
+    $runtimeLog = [IO.File]::ReadAllText($runtimeLogs[0].FullName,[Text.Encoding]::UTF8)
+    $initializedProfile = $runtimeLog.Contains('Diagnostic profiling enabled at build time;')
+    $reportedProfile = $runtimeLog.Contains('Profile diagnostic-only')
+    if ($Profiling -eq '1') {
+        if (!$initializedProfile) { throw "Diagnostic fixture did not initialize profiling: $run" }
+        # Hidden policy-only windows post their quit through the shim's OWN IAT,
+        # which deliberately stays native. A CRT return need not call a covered
+        # ExitProcess import either. Do not invent coverage for that path.
+        $coveredTermination = !$case.PolicyOnly -or $runtimeLog.Contains('Application ExitProcess') -or
+            $runtimeLog.Contains('Application PostQuitMessage')
+        if ($coveredTermination) {
+            if (!$reportedProfile) { throw "Covered diagnostic fixture did not report profiling: $run" }
+            Write-Host 'PASS: diagnostic DLL initializes and reports bounded profiling outside DllMain'
+        } else {
+            if ($reportedProfile -or !$runtimeLog.Contains('shim calls PostQuitMessage(0)')) {
+                throw "Hidden fixture profiling coverage is inconsistent: $run"
+            }
+            Write-Host 'PASS: hidden diagnostic fixture initializes profiling without inventing covered-exit reports'
+        }
+    } else {
+        if ($initializedProfile -or $reportedProfile) { throw "Normal DLL unexpectedly enabled profiling: $run" }
+        Write-Host 'PASS: normal DLL keeps profiling disabled without changing the INI'
+    }
     Write-Host "Fixture reports: $run\logs"
 }

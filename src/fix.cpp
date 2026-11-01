@@ -10,6 +10,7 @@
 #include "scale_geometry.h"
 #include "ddraw_scale.h"
 #include "ui_quality.h"
+#include "profile.h"
 #ifdef _MSC_VER
 #include <intrin.h>
 #define LAKE_CALLER_ADDRESS() _ReturnAddress()
@@ -96,6 +97,7 @@ void InitializeLog() {
 }
 
 void Log(const wchar_t* text, bool nonBlocking = false) {
+    [[maybe_unused]] lakefix::profile::Scope timing(lakefix::profile::Metric::LogTotal);
     const DWORD error = GetLastError();
     wchar_t line[768]{};
     swprintf_s(line, L"[LakeWindowedFix 0.6] tick=%llu pid=%lu tid=%lu %ls\r\n",
@@ -109,7 +111,10 @@ void Log(const wchar_t* text, bool nonBlocking = false) {
             const bool acquired = lakefix::AcquireDiagnosticLock(logLock, nonBlocking);
             if (acquired) {
                 DWORD written{};
-                WriteFile(logFile, encoded, static_cast<DWORD>(length - 1), &written, nullptr);
+                {
+                    [[maybe_unused]] lakefix::profile::Scope writeTiming(lakefix::profile::Metric::LogWrite);
+                    WriteFile(logFile, encoded, static_cast<DWORD>(length - 1), &written, nullptr);
+                }
                 ReleaseSRWLockExclusive(&logLock);
             }
         }
@@ -381,11 +386,10 @@ void RestoreCursorVisibility() {
     lakefix::ReleaseCursorVisibility(cursorVisibilityCredits, [](BOOL show) noexcept { return ShowCursor(show); });
 }
 
-void EnsureCursorVisible() {
-    CURSORINFO info{};
-    info.cbSize = sizeof(info);
-    if (!GetCursorInfo(&info) || (info.flags & CURSOR_SHOWING)) return;
-    lakefix::AcquireCursorVisibility(cursorVisibilityCredits, [](BOOL show) noexcept { return ShowCursor(show); });
+lakefix::CursorVisibilitySample EnsureCursorVisible() {
+    return lakefix::EnsureCursorVisibility(cursorVisibilityCredits,
+        [](PCURSORINFO info) noexcept { return GetCursorInfo(info); },
+        [](BOOL show) noexcept { return ShowCursor(show); });
 }
 
 LRESULT CALLBACK ChildCursorProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
@@ -446,8 +450,9 @@ int WINAPI HookMapWindowPoints(HWND from, HWND to, LPPOINT points, UINT count) {
     const int result = MapWindowPoints(from, to, points, count);
     const DWORD saved = GetLastError();
     if (UseSystemCursor() && from == nullptr && to == client && count == 2 && points &&
-        RendererAddress(caller) && lakefix::IsCursorPaintReturn(
-            reinterpret_cast<ULONG_PTR>(caller) - reinterpret_cast<ULONG_PTR>(renderer))) {
+         RendererAddress(caller) && lakefix::IsCursorPaintReturn(
+             reinterpret_cast<ULONG_PTR>(caller) - reinterpret_cast<ULONG_PTR>(renderer))) {
+        [[maybe_unused]] lakefix::profile::Scope timing(lakefix::profile::Metric::CursorPaint);
         // Outside this host, leave the other application's cursor alone and
         // suppress Lake's stale bitmap. Inside, suppress only after confirming
         // a visible OS cursor. Hidden-count/modal cases retain the legacy sprite.
@@ -456,11 +461,11 @@ int WINAPI HookMapWindowPoints(HWND from, HWND to, LPPOINT points, UINT count) {
         bool suppress = !sample.insideClient;
         if (!suppress) {
             SetCursor(systemArrow);
-            EnsureCursorVisible();
-            CURSORINFO info{};
-            info.cbSize = sizeof(info);
-            // Suppressed or unknown OS visibility retains the bitmap fallback.
-            suppress = GetCursorInfo(&info) && (info.flags & CURSOR_SHOWING) && info.hCursor == systemArrow;
+            const auto visibility = EnsureCursorVisible();
+            // Reuse only this call's already-visible arrow observation. Any
+            // recovery, failure or unexpected cursor still needs a fresh query.
+            suppress = lakefix::ConfirmSystemCursor(visibility, systemArrow,
+                [](PCURSORINFO info) noexcept { return GetCursorInfo(info); });
         }
         if (suppress && lakefix::HideSoftwareCursorRectangle(points, count) && !systemCursorLogged) {
             systemCursorLogged = true;
@@ -498,6 +503,7 @@ thread_local CursorRoundTrip cursorRoundTrip;
 thread_local bool deliveringClientWheel;
 
 BOOL WINAPI HookCursorPosition(LPPOINT point) {
+    [[maybe_unused]] lakefix::profile::Scope timing(lakefix::profile::Metric::CursorPosition);
     const void* caller = LAKE_CALLER_ADDRESS();
     cursorRoundTrip.armed = false;
     const BOOL result = GetCursorPos(point);
@@ -547,7 +553,8 @@ BOOL WINAPI HookSetCursorPosition(int x, int y) {
 void MapMessagePoint(MSG* message) {
     if (!message || !scaleRenderingEnabled || !client ||
         message->message < WM_MOUSEFIRST || message->message > WM_MOUSELAST ||
-        (message->hwnd != client && message->hwnd != host && !IsChild(client, message->hwnd))) return;
+         (message->hwnd != client && message->hwnd != host && !IsChild(client, message->hwnd))) return;
+    [[maybe_unused]] lakefix::profile::Scope timing(lakefix::profile::Metric::QueueMapping);
     InputGeometry geometry;
     const bool haveGeometry = CaptureInputGeometry(geometry, true);
     const bool wheel = message->message == WM_MOUSEWHEEL || message->message == WM_MOUSEHWHEEL;
@@ -1222,11 +1229,21 @@ void WINAPI HookQuit(int code) {
     if (GetCurrentThreadId() == uiThreadId.load()) {
         nativeUiQuitCode.store(code);
         nativeUiQuitPending.store(true);
+        if constexpr (lakefix::profile::kEnabled) {
+            static std::atomic<bool> reported{false};
+            if (!reported.exchange(true, std::memory_order_relaxed))
+                lakefix::profile::Report(PresenterLog, L"native-ui-quit-request-not-exit");
+        }
     }
 }
 
 [[noreturn]] void WINAPI HookExit(UINT code) {
     LogSite(L"Application ExitProcess", code, LAKE_CALLER_ADDRESS(), true);
+    if constexpr (lakefix::profile::kEnabled) {
+        static std::atomic<bool> reported{false};
+        if (!reported.exchange(true, std::memory_order_relaxed))
+            lakefix::profile::Report(PresenterLog, L"observed-ExitProcess-call");
+    }
     ExitProcess(code);
 }
 
@@ -1400,6 +1417,11 @@ extern "C" DWORD WINAPI LakeWindowedInitialize(void*) {
     if (InterlockedCompareExchange(&initialization, 1, 0) != 0) return ERROR_ALREADY_INITIALIZED;
     InitializeLog();
     Log(L"Initialize begin");
+    if constexpr (lakefix::profile::kEnabled) {
+        Log(lakefix::profile::Initialize()
+            ? L"Diagnostic profiling enabled at build time; bounded QPC aggregates, not displayed FPS"
+            : L"Diagnostic profiling unavailable: performance clock initialization failed", true);
+    }
     LoadResizePolicy();
     if (scaleRenderingEnabled && systemCursorEnabled) {
         systemArrow = LoadCursorW(nullptr, IDC_ARROW);
