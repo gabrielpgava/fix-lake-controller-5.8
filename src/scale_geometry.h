@@ -59,6 +59,25 @@ inline POINT ViewToSource(const RECT& viewport, SIZE source, POINT point) noexce
             static_cast<LONG>(y * source.cy / height)};
 }
 
+// A captured interaction already has a recipient. Keep the same affine map
+// beyond every edge, independently per axis; do not turn a release/drag into a
+// fresh hit-test or clamp it to an unrelated control. Floor extends the inside
+// convention continuously to negative coordinates. Saturation is only for LONG
+// representability, never to the image bounds.
+inline POINT ViewToSourceCaptured(const RECT& viewport, SIZE source, POINT point) noexcept {
+    if (source.cx <= 0 || source.cy <= 0 || viewport.right <= viewport.left || viewport.bottom <= viewport.top)
+        return {-1, -1};
+    const auto axis = [](LONG coordinate, LONG edge, LONG extent, std::int64_t view) noexcept {
+        const std::int64_t product = (static_cast<std::int64_t>(coordinate) - edge) * extent;
+        const std::int64_t mapped = product / view - (product < 0 && product % view != 0 ? 1 : 0);
+        const LONG low = (std::numeric_limits<LONG>::min)();
+        const LONG high = (std::numeric_limits<LONG>::max)();
+        return mapped < low ? low : mapped > high ? high : static_cast<LONG>(mapped);
+    };
+    return {axis(point.x, viewport.left, source.cx, static_cast<std::int64_t>(viewport.right) - viewport.left),
+            axis(point.y, viewport.top, source.cy, static_cast<std::int64_t>(viewport.bottom) - viewport.top)};
+}
+
 // The reverse mapping uses the same floor/leading-edge convention. Scaling
 // discards pixels, so a round trip is not generally an identity. Invalid
 // rectangles, sizes or source coordinates return (-1, -1).

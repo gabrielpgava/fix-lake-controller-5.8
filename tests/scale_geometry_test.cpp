@@ -220,6 +220,28 @@ void TestCursorDeltas() {
     CheckPoint(TranslateCursorDelta({high, low}, {low, high}, {high, low}, {high, high}, {1, 1}),
                {high, low}, "extreme cursor deltas saturate without product overflow");
 }
+
+void TestCapturedMapping() {
+    using lakefix::ViewToSourceCaptured;
+    const RECT viewport{0, 75, 800, 525};
+    const SIZE source{1088, 612};
+    CheckPoint(ViewToSourceCaptured(viewport, source, {400, 74}), {544, -2}, "capture above keeps valid horizontal axis");
+    CheckPoint(ViewToSourceCaptured(viewport, source, {-1, 300}), {-2, 306}, "capture left keeps valid vertical axis");
+    CheckPoint(ViewToSourceCaptured(viewport, source, {800, 300}), {1088, 306}, "capture right extrapolates without clamp");
+    CheckPoint(ViewToSourceCaptured(viewport, source, {400, 525}), {544, 612}, "capture below delivers continuous release coordinate");
+    CheckPoint(ViewToSourceCaptured(viewport, source, {-7, -9}), {-10, -115}, "capture corner uses signed floor on both axes");
+    CheckPoint(ViewToSourceCaptured(viewport, source, {400, 300}), {544, 306}, "capture inside agrees with ordinary map");
+    CheckPoint(ViewToSourceCaptured({}, source, {400, 300}), {-1, -1}, "invalid capture geometry cannot divide by zero");
+    const LONG low = (std::numeric_limits<LONG>::min)(), high = (std::numeric_limits<LONG>::max)();
+    CheckPoint(ViewToSourceCaptured({0, 0, 1, 1}, {high, high}, {low, high}), {low, high}, "capture extrapolation saturates only at LONG bounds");
+    // Demonstrates truncation, not a claim that Lake requires accumulating it.
+    POINT repeated{100, 100};
+    for (int i = 0; i < 17; ++i)
+        repeated = lakefix::TranslateCursorDelta(repeated, {0, 0}, {1, 1}, {1024, 576}, source);
+    CheckPoint(repeated, {100, 100}, "small-delta truncation is reproduced with default canvas ratio");
+    CheckPoint(lakefix::TranslateCursorDelta({100, 100}, {0, 0}, {17, 17}, {1024, 576}, source), {116, 116},
+               "aggregate delta differs; accumulation remains disabled pending callsite evidence");
+}
 } // namespace
 
 static_assert(sizeof(LONG) == 4, "These tests exercise Win32 LONG bounds");
@@ -234,6 +256,7 @@ int wmain() {
     TestLargeCoordinates();
     TestRoundTrips();
     TestCursorDeltas();
+    TestCapturedMapping();
     printf("%d check(s), %d failure(s)\n", checks, failures);
     return failures ? 1 : 0;
 }

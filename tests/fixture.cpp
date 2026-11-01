@@ -207,9 +207,7 @@ LRESULT NativeFixtureProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
         return unicode ? DefWindowProcW(window, message, wparam, lparam)
                        : DefWindowProcA(window, message, wparam, lparam);
     }
-    if (observeSyntheticMouse &&
-        (message == WM_MOUSEMOVE || message == WM_LBUTTONDOWN || message == WM_LBUTTONUP ||
-         message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL)) {
+    if (observeSyntheticMouse && message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) {
         ++syntheticMouseMessages;
         lastMouseMessage = message;
         lastMouseKeys = wparam;
@@ -242,7 +240,7 @@ LRESULT CALLBACK InputChildProc(HWND window, UINT message, WPARAM wparam, LPARAM
     if (passWheelToDefault && (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL)) {
         if (++unhandledWheelMessages > 8) return 0;
     }
-    if (observeSyntheticMouse && message == WM_MOUSEMOVE) {
+    if (observeSyntheticMouse && message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) {
         ++syntheticChildMouseMessages;
         lastChildMousePoint = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         return 0;
@@ -287,6 +285,18 @@ bool FixedScaledSource(HWND renderer, HWND frame) {
     MapWindowPoints(renderer, frame, &origin, 1);
     return rectangle.left == 0 && rectangle.top == 0 && rectangle.right == 1536 &&
            rectangle.bottom == 864 && origin.x == 0 && origin.y == 0;
+}
+
+// Independent oracle for a captured drag: continue the affine transform on
+// each axis, including outside the image. No clamp and no shared sentinel.
+POINT ExpectedCapturedPoint(const RECT& viewport, SIZE source, POINT point) {
+    const auto axis = [](LONG p, LONG edge, LONG size, LONG view) {
+        const std::int64_t product = (static_cast<std::int64_t>(p) - edge) * size;
+        const std::int64_t quotient = product / view;
+        return static_cast<LONG>(quotient - (product < 0 && product % view != 0 ? 1 : 0));
+    };
+    return {axis(point.x, viewport.left, source.cx, viewport.right - viewport.left),
+            axis(point.y, viewport.top, source.cy, viewport.bottom - viewport.top)};
 }
 
 void CheckSyntheticMouse(HWND renderer, UINT message, POINT view, POINT expected,
@@ -358,12 +368,20 @@ void TestScaledMouse(HWND renderer, LONG width, LONG height) {
     const bool captured = GetCapture() == renderer;
     Check(captured, "synthetic renderer can own mouse capture");
     if (captured) {
-        CheckSyntheticMouse(renderer, WM_MOUSEMOVE, {-7, -9}, {-1, -1}, MK_LBUTTON, true,
-                            "captured negative coordinates remain signed and outside");
+        CheckSyntheticMouse(renderer, WM_MOUSEMOVE, {-7, -9}, ExpectedCapturedPoint(viewport, source, {-7, -9}), MK_LBUTTON, true,
+                             "captured negative coordinates extrapolate without jumping to sentinel");
         CheckSyntheticMouse(renderer, WM_LBUTTONDOWN, {-7, -9}, {-1, -1}, MK_LBUTTON, false,
-                            "capture does not allow an outside button down");
-        CheckSyntheticMouse(renderer, WM_LBUTTONUP, {-7, -9}, {-1, -1}, 0, true,
-                            "captured outside button up reaches native cleanup");
+                             "capture does not allow an outside button down");
+        CheckSyntheticMouse(renderer, WM_LBUTTONUP, {-7, -9}, ExpectedCapturedPoint(viewport, source, {-7, -9}), 0, true,
+                             "captured outside button up reaches native cleanup");
+        for (const POINT point : outside) {
+            CheckSyntheticMouse(renderer, WM_MOUSEMOVE, point, ExpectedCapturedPoint(viewport, source, point),
+                                MK_LBUTTON | MK_CONTROL | MK_SHIFT, true,
+                                "captured edge preserves the valid axis and modifiers");
+            CheckSyntheticMouse(renderer, WM_XBUTTONUP, point, ExpectedCapturedPoint(viewport, source, point),
+                                MAKEWPARAM(MK_CONTROL, XBUTTON2), true,
+                                "captured extra-button release preserves destination and button");
+        }
         CheckSyntheticMouse(renderer, WM_MOUSEMOVE, center, lakefix::ViewToSource(viewport, source, center),
                             MK_LBUTTON, true, "captured inside movement is scaled once");
         ReleaseCapture();
@@ -396,8 +414,8 @@ void TestScaledMessagePoints(HWND renderer, HWND frame) {
         POINT raw{}, mapped{}, after{};
         const bool queried = rawCursor(&raw) && GetCursorPos(&mapped) && rawCursor(&after);
         ReleaseCapture();
-        const POINT expected = lakefix::ViewToSource(viewport, source,
-                                                     {raw.x - origin.x, raw.y - origin.y});
+        const POINT expected = ExpectedCapturedPoint(viewport, source,
+                                                      {raw.x - origin.x, raw.y - origin.y});
         Check(queried && raw.x == after.x && raw.y == after.y && mapped.x == origin.x + expected.x &&
               mapped.y == origin.y + expected.y,
               "captured GetCursorPos maps even outside image without moving real cursor");
@@ -471,7 +489,36 @@ void TestScaledMessagePoints(HWND renderer, HWND frame) {
         DispatchMessageW(&childMouse);
         observeSyntheticMouse = false;
         Check(syntheticChildMouseMessages == beforeChild + 1 && lastChildMousePoint.x == virtualLocal.x &&
-              lastChildMousePoint.y == virtualLocal.y, "native child receives exactly one virtual local mouse point");
+               lastChildMousePoint.y == virtualLocal.y, "native child receives exactly one virtual local mouse point");
+
+        SetCapture(inputChild);
+        Check(GetCapture() == inputChild, "native child can own capture without shim-owned capture state");
+        const POINT points[] = {{-7, 90}, {100, -9}, {area.right + 7, area.bottom + 9}, {100, 90}};
+        const UINT messages[] = {WM_MOUSEMOVE, WM_LBUTTONUP, WM_RBUTTONUP, WM_MBUTTONUP, WM_XBUTTONUP};
+        for (UINT message : messages) {
+            for (const POINT point : points) {
+                POINT expectedLocal = ExpectedCapturedPoint(viewport, source, point);
+                MapWindowPoints(renderer, inputChild, &expectedLocal, 1);
+                const WPARAM keys = message == WM_XBUTTONUP ? MAKEWPARAM(MK_SHIFT, XBUTTON2) : MK_CONTROL;
+                PostMessageW(renderer, message, keys, MAKELPARAM(point.x, point.y));
+                MSG peek{}, again{}, removed{};
+                const bool first = PeekMessageA(&peek, renderer, message, message, PM_NOREMOVE) != FALSE;
+                const bool second = PeekMessageW(&again, renderer, message, message, PM_NOREMOVE) != FALSE;
+                const bool got = GetMessageW(&removed, renderer, message, message) > 0;
+                Check(first && second && got && peek.hwnd == inputChild && removed.hwnd == inputChild &&
+                      peek.lParam == again.lParam && again.lParam == removed.lParam && removed.wParam == keys &&
+                      GET_X_LPARAM(removed.lParam) == expectedLocal.x && GET_Y_LPARAM(removed.lParam) == expectedLocal.y,
+                      "captured child gets continuous local point, buttons and repeat-peek exactly once");
+                const int before = syntheticChildMouseMessages;
+                observeSyntheticMouse = true;
+                DispatchMessageW(&removed);
+                observeSyntheticMouse = false;
+                Check(syntheticChildMouseMessages == before + 1 && lastChildMousePoint.x == expectedLocal.x &&
+                      lastChildMousePoint.y == expectedLocal.y, "captured child dispatch preserves release recipient without double transform");
+            }
+        }
+        ReleaseCapture();
+        Check(GetCapture() == nullptr, "native ReleaseCapture leaves no shim interaction to become stuck");
     }
     passWheelToDefault = true;
     unhandledWheelMessages = 0;

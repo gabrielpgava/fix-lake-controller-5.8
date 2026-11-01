@@ -47,7 +47,7 @@ do README não são evidência da candidata. Setup e publicação têm validaç�
 | 1. Baseline e comparação | este documento, build/testes | Snapshot isolado, comandos reais, preservar HEAD | Baseline executada acima |
 | 2. Falhas de proxy/layout: risco estático de escala parcial | `fix.cpp`, `ddraw_scale.*`, testes | Fail-closed de criação, estágio explícito, regressões de falha | Em implementação; Lake pendente |
 | 2. Erros e corrida launcher: defeitos demonstráveis | `launcher.cpp`, políticas/testes novos | Early exit/erro/timeout distintos, snapshot limitado, mutex, handshake/identidade | Em implementação |
-| 3. Captura externa perde ambos eixos: defeito lógico | `scale_geometry.h`, `fix.cpp`, fixture | Separar hit-test de transformação contínua sem clamp universal | Regressão antes da correção |
+| 3. Captura externa perde ambos eixos: defeito lógico | `scale_geometry.h`, `fix.cpp`, fixture | Hit-test separado de extrapolação capturada por eixo | Regressão na baseline e testes corrigidos executados; [INPUT-RELIABILITY.md](INPUT-RELIABILITY.md); Lake pendente |
 | 3. Deltas pequenos: matemática, sem semântica real comprovada | geometria/diagnóstico | Instrumentação restrita; acumulação comportamental desativada | Investigação proprietária pendente |
 | 4. Restore não invalida letterbox: risco estático reproduzível COM | `ddraw_scale.cpp`, presenter test | Invalidar após sucesso, preservar HRESULT/reentrância | Em implementação |
 | 4. Critério de frame amplo/publicação prematura: defeito lógico | presenter/provider, testes | Admitir papel/dimensões/destino; publicar somente após sucesso | Em implementação |

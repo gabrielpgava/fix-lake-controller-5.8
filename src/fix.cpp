@@ -329,17 +329,27 @@ bool PaintLetterbox(HWND window, const RECT* strips, UINT count) noexcept {
     return result;
 }
 
-bool MapClientPoint(POINT real, POINT& mapped) {
+bool CanvasOwnsCapture() {
+    const HWND capture = GetCapture();
+    return client && capture && (capture == client || IsChild(client, capture));
+}
+
+POINT TransformInputPoint(const InputGeometry& geometry, POINT point, bool captured) {
+    return captured ? lakefix::ViewToSourceCaptured(geometry.viewport, geometry.source, point)
+                    : lakefix::ViewToSource(geometry.viewport, geometry.source, point);
+}
+
+bool MapClientPoint(POINT real, POINT& mapped, bool allowCapture = true) {
     InputGeometry geometry;
     if (!CaptureInputGeometry(geometry)) return false;
-    mapped = lakefix::ViewToSource(geometry.viewport, geometry.source, real);
+    mapped = TransformInputPoint(geometry, real, allowCapture && CanvasOwnsCapture());
     return true;
 }
 
 bool MapScreenPoint(const InputGeometry& geometry, POINT real, POINT& mapped) {
     if (!geometry.hasOrigin) return false;
-    const POINT source = lakefix::ViewToSource(geometry.viewport, geometry.source,
-        {real.x - geometry.origin.x, real.y - geometry.origin.y});
+    const POINT source = TransformInputPoint(geometry,
+        {real.x - geometry.origin.x, real.y - geometry.origin.y}, CanvasOwnsCapture());
     mapped = {geometry.origin.x + source.x, geometry.origin.y + source.y};
     return true;
 }
@@ -563,8 +573,9 @@ void MapMessagePoint(MSG* message) {
         POINT raw{static_cast<short>(LOWORD(message->lParam)), static_cast<short>(HIWORD(message->lParam))};
         MapWindowPoints(message->hwnd, client, &raw, 1);
         if (!haveGeometry) return;
-        POINT source = lakefix::ViewToSource(geometry.viewport, geometry.source, raw);
         HWND target = GetCapture();
+        const bool captured = target == client || IsChild(client, target);
+        POINT source = TransformInputPoint(geometry, raw, captured);
         if (target != client && !IsChild(client, target)) {
             target = client;
             if (source.x >= 0 && source.y >= 0) {
@@ -869,11 +880,11 @@ LRESULT CALLBACK ClientProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         message != WM_MOUSEWHEEL && message != WM_MOUSEHWHEEL) {
         const POINT position{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
         POINT mapped{};
-        if (MapClientPoint(position, mapped)) {
-            const bool down = message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN ||
+        const bool down = message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN ||
                 message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN ||
                 message == WM_LBUTTONDBLCLK || message == WM_RBUTTONDBLCLK ||
                 message == WM_MBUTTONDBLCLK || message == WM_XBUTTONDBLCLK;
+        if (MapClientPoint(position, mapped, !down)) {
             if (down && (mapped.x < 0 || mapped.y < 0)) return 0;
             lparam = MAKELPARAM(mapped.x, mapped.y);
         }
