@@ -47,11 +47,32 @@ int syntheticChildMouseMessages;
 POINT lastChildMousePoint{};
 SIZE fixtureSource{1536, 864};
 
+template<class TryBarrier, class Pause>
+bool RetryFixtureDiagnosticBarrier(TryBarrier tryBarrier, Pause pause) {
+    // A test control path only: Flush is deliberately try-only on admission.
+    // At most four calls (each export wait is <= 2000 ms), never enqueue again,
+    // repeat input, alter logging policy, or retry native application operations.
+    for (unsigned attempt = 0; attempt < 4; ++attempt) {
+        if (tryBarrier()) return true;
+        if (attempt + 1 < 4) pause();
+    }
+    return false;
+}
+
 bool FlushFixtureDiagnostics() {
     const HMODULE module = GetModuleHandleW(L"LakeWindowedFix.dll");
     const auto address = GetProcAddress(module, "LakeWindowedFlushDiagnostics");
     using Flush = DWORD (WINAPI*)(void*);
-    return address && reinterpret_cast<Flush>(reinterpret_cast<void*>(address))(nullptr) == ERROR_SUCCESS;
+    if (!address) return false;
+    unsigned declined = 0;
+    const auto flush = reinterpret_cast<Flush>(reinterpret_cast<void*>(address));
+    const bool completed = RetryFixtureDiagnosticBarrier([&] {
+        const bool accepted = flush(nullptr) == ERROR_SUCCESS;
+        if (!accepted) ++declined;
+        return accepted;
+    }, [] { Sleep(1); });
+    if (declined) std::printf("METRIC fixture_diagnostic_barrier_declined=%u completed=%u max_attempts=4\n", declined, static_cast<unsigned>(completed));
+    return completed;
 }
 
 LONG CALLBACK HandleSyntheticException(EXCEPTION_POINTERS* info) {
@@ -85,6 +106,19 @@ void Check(bool condition, const char* name) {
     ++checks;
     printf("%s: %s\n", condition ? "PASS" : "FAIL", name);
     if (!condition) ++failures;
+}
+
+void TestFixtureDiagnosticBarrier() {
+    unsigned calls = 0, pauses = 0;
+    const auto pause = [&] { ++pauses; };
+    Check(RetryFixtureDiagnosticBarrier([&] { ++calls; return true; }, pause) && calls == 1 && pauses == 0,
+          "fixture diagnostic barrier stops immediately after first success");
+    calls = pauses = 0;
+    Check(RetryFixtureDiagnosticBarrier([&] { return ++calls == 3; }, pause) && calls == 3 && pauses == 2,
+          "fixture diagnostic barrier tolerates bounded try-only admission failures without repeating records");
+    calls = pauses = 0;
+    Check(!RetryFixtureDiagnosticBarrier([&] { ++calls; return false; }, pause) && calls == 4 && pauses == 3,
+          "fixture diagnostic barrier reports persistent failure after its fixed retry limit");
 }
 
 void CheckContourSessionIdentity(HMODULE& module) {
@@ -935,6 +969,7 @@ int wmain(int argc, wchar_t** argv) {
             ExitProcess(static_cast<UINT>(wcstoul(argv[i + 1], nullptr, 10)));
         }
     }
+    TestFixtureDiagnosticBarrier();
     wchar_t configuration[1024]{};
     GetModuleFileNameW(nullptr, configuration, ARRAYSIZE(configuration));
     wchar_t* slash = wcsrchr(configuration, L'\\');

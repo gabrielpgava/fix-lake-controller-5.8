@@ -64,6 +64,34 @@ promovido a candidato distribuível.
 
 ## Evidência isolada anterior (não substitui a integração acima)
 
+### Falha detectada na primeira rodada limpa de profiling
+
+Build `188c61b837a94e56bb27ee1f240264ee`, fontes limpas de `2f7a1d4`: a fixture
+`windows_safe_no_rebuild` falhou ao exigir os logs de quit. O build ficou
+**Building**, não foi promovido e não é contado como aprovação. Os dois registros
+estão no arquivo próprio (offsets 7184 e 21687, tamanho 32494 bytes); não foi uma
+regressão demonstrada de quit ou perda desses registros. A fixture fazia uma única
+tentativa de `Flush`, embora essa API rejeite contenção try-only por contrato
+(a suíte do logger já cobre essa recusa determinística).
+
+A correção limita a **quatro** tentativas somente da barreira no caminho de
+controle do teste, cada export com espera de até 2000 ms, pausando 1 ms entre
+recusas. Falha persistente continua sendo falha; a busca dos registros permanece
+obrigatória. Três checks sintéticos cobrem sucesso imediato, recusa transitória
+e limite permanente. Não se repetem input/frames/registros nem se altera o logger
+de produção. As evidências falhas ficam em `build-candidate-profile`; a rodada
+completa posterior usa novos diretórios/BuildIds.
+
+Probe corrigido com `-O2 -g -Wall -Wextra -Wpedantic -Werror`, mantendo a mesma
+DLL de teste otimizada da rodada falha: três execuções legacy/profiling e o
+runner escalado completo passaram. Nas repetições 2 e 3, a métrica registrou
+**uma recusa real da barreira seguida de sucesso**, no mesmo ponto do teste de
+quit; os registros continuaram exigidos. Evidência local em
+`build-fixture-barrier-regression/legacy-profile-{1,2,3}.log` e
+`scaled-profile.log`. Isso valida a correção do harness, não um ganho no runtime.
+
+### Rodadas iniciais por módulo
+
 | Camada | Execução | Resultado / limite |
 | --- | --- | --- |
 | Matemática | Geometria/captura x86 `build-input-regression` | 129 checks, zero falhas; não pixels |
