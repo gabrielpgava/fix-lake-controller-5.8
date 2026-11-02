@@ -68,6 +68,12 @@ std::wstring Join(const std::wstring& path, const wchar_t* name) { return path +
 bool Equal(const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) == 0; }
 bool Exists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; }
 
+std::wstring LongPath(const std::wstring& path) {
+    std::vector<wchar_t> buffer(32768);
+    const DWORD length = GetLongPathNameW(path.c_str(), buffer.data(), static_cast<DWORD>(buffer.size()));
+    return length && length < buffer.size() ? std::wstring(buffer.data(), length) : std::wstring();
+}
+
 bool NewFile(const std::wstring& path, const void* data, std::size_t size) {
     Handle file(CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW,
                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
@@ -132,7 +138,12 @@ std::wstring CreateSandbox() {
     if (!CreateDirectoryW(root.c_str(), nullptr)) return {};
     if (!NewText(Join(root, L".setup-engine-test-owned"),
         "LakeWindowedFix setup_engine_test owned sandbox; never recursively delete unknown paths.\r\n")) return {};
-    return root;
+    // GetTempPath can contain an existing 8.3 alias (e.g. RUNNER~1 in CI).
+    // The engine intentionally expands it before persisting paths; fixture
+    // expectations must describe that same canonical directory identity.
+    const std::wstring canonical = LongPath(root);
+    if (!Require(!canonical.empty(), "expand the created sandbox's existing 8.3 components")) return {};
+    return canonical;
 }
 
 struct Fixture {
@@ -306,6 +317,37 @@ void TestIdentity(const std::wstring& root) {
     Check(LakeBuild().executableSha256 == L"e9c9d291f9c20732904dd6b943737537c242508e546cda2afb1f72dfc2374713" &&
           LakeBuild().rendererSha256 == L"bb7d4126a83b775968d49ce52f885b588561838d97ffe062ec46a8208b94c283",
           "production build identity remains the two fixed original hashes");
+}
+
+void TestShortPathCanonicalization(const std::wstring& root) {
+    Fixture f(root, L"short-path-canonicalization");
+    if (!f.ready) return;
+    std::vector<wchar_t> buffer(32768);
+    const DWORD length = GetShortPathNameW(f.root.c_str(), buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (!Require(length && length < buffer.size(), "query the private fixture's short-path spelling")) return;
+    const std::wstring shortRoot(buffer.data(), length);
+    if (Equal(shortRoot, f.root)) {
+        ++skips;
+        printf("SKIP: distinct 8.3 alias unavailable for own fixture; not counted as PASS\n");
+        return;
+    }
+    Locations aliases = f.locations;
+    aliases.installDirectory = Join(shortRoot, L"installed");
+    aliases.desktopDirectory = Join(shortRoot, L"sandbox desktop");
+    aliases.programsDirectory = Join(shortRoot, L"sandbox programs");
+    const Result installed = Install(aliases, Join(shortRoot, L"original application"), f.payloads.data(), f.payloads.size(),
+                                     Join(shortRoot, L"source-setup.exe"), f.build);
+    Report(installed);
+    Check(installed.ok && f.filesMatch(), "8.3 input spellings install only into the same canonical private fixture");
+    if (!installed.ok) return;
+    const LinkInfo desktop = ReadLink(f.desktopLink()), programs = ReadLink(f.programsLink());
+    const std::wstring arguments = L"--app-dir \"" + f.app + L"\"";
+    Check(desktop.ok && programs.ok && Equal(desktop.target, f.installed(kNames[0])) &&
+          Equal(programs.target, desktop.target) && desktop.arguments == arguments && programs.arguments == arguments &&
+          Equal(desktop.workingDirectory, f.app) && Equal(programs.workingDirectory, f.app),
+          "8.3 inputs produce canonical launcher, quoted app-dir and working-directory shortcut properties");
+    Check(f.install().alreadyInstalled && Uninstall(aliases, f.payloads.data(), f.payloads.size()).ok &&
+          f.ownedGone() && f.originalsUnchanged(), "canonical repair and alias-spelled removal share the same verified ownership receipt");
 }
 
 void TestInstallAndPreservation(const std::wstring& root) {
@@ -1397,6 +1439,7 @@ int wmain() {
     Check(!LakeIsRunning(), "Lake must already be closed; the test never launches, closes or kills it");
     if (!failures) {
         TestIdentity(root);
+        TestShortPathCanonicalization(root);
         TestInstallAndPreservation(root);
         TestNormalRemoval(root);
         TestPayloadAndBuildRejection(root);

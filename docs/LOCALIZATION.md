@@ -72,6 +72,25 @@ somente a geração duplicada do manifesto MSVC nos dois executáveis que já us
 `setup.rc`; o recurso explícito `asInvoker` permanece. O CI passa a reter os logs
 próprios ocultos e exibir falhas, sem alterar critérios ou pular verificações.
 
+O novo CI de `f8b0206` confirmou o link MSVC sem manifesto duplicado e identificou
+duas causas adicionais: o sandbox usava `C:\Users\RUNNER~1` em expectativas,
+enquanto o engine corretamente expandia esse caminho para o nome longo; quatro
+comparações de atalhos e a edição exata do caminho no recibo falhavam. A fixture
+passa a expandir a raiz que criou, sem relaxar checks de atalhos/recibos, e ganha
+regressão explícita com entradas 8.3 para instalar/reconhecer/remover os mesmos
+objetos. O engine não é alterado por essa correção de expectativas.
+
+O MSVC otimizado convertia o array local de BuildId em instruções imediatas,
+deixando o identificador ausente das seções de dados exigidas pelo guardião de
+símbolos. O identificador do setup passa a ter armazenamento estático endereçável,
+lido pelo mesmo `--verify-payload`; a guarda de identidade permanece inalterada.
+
+O candidato limpo `f8b0206` passou localmente nas 18 suítes de runtime, três de
+setup e validação do pacote real; guardas: 30 de proveniência e 27 de publicação
+com mocks. CMake setup ON passou 20/20. São resultados anteriores às duas correções
+acima, não uma aprovação do CI falho. Evidências em `build-i18n-integrated-*`,
+`build-i18n-cmake-2-*` e `build-i18n-ci-f8b0206-evidence`.
+
 ## Publicação
 
 Primeiro release público `v0.7.0` permanece experimental e não assinado, com quatro

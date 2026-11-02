@@ -23,6 +23,9 @@ using Mode = setup::Mode;
 using Language = setup::Language;
 using TextId = setup::TextId;
 using setup::Text;
+// Addressable static storage is intentional: an optimized MSVC stack-local
+// array can become immediate instructions instead of runtime identity data.
+constexpr char kSetupBuildId[] = LAKE_FIX_BUILD_ID;
 
 template<class Procedure> Procedure User32Procedure(const char* name) {
     const FARPROC address = GetProcAddress(GetModuleHandleW(L"user32.dll"), name);
@@ -539,9 +542,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         const setup::Result result = setup::VerifyPayload(setup::kPayloadFiles, ARRAYSIZE(setup::kPayloadFiles));
         // Retain this setup link's exact identity in runtime data, independently
         // of the embedded runtime payload's different BuildId. No GUI or install.
-        constexpr char buildId[] = LAKE_FIX_BUILD_ID;
         DWORD written = 0;
-        WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), buildId, sizeof(buildId) - 1, &written, nullptr);
+        WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), kSetupBuildId, sizeof(kSetupBuildId) - 1, &written, nullptr);
         return result.ok ? 0 : static_cast<int>(result.error ? result.error : ERROR_INVALID_DATA);
     }
     setup::SetupOptions options;
