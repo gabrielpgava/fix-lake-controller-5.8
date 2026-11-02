@@ -13,14 +13,15 @@ function Get-LakeRequiredTests([string]$Component) {
             'resource_metrics_policy','isolated_build_options','windows_safe_no_rebuild',
             'windows_experimental_resize','windows_exit_observer','windows_scaled_window',
             'startup_policy','session_configuration','component_contract','diagnostics_queue','monitor_lifecycle_policy','window_state_snapshots','own_link_symbols')
-    } elseif ($Component -eq 'Setup') { @('installer_sandbox','installer_payload_integrity') }
+    } elseif ($Component -eq 'Setup') { @('installer_sandbox','installer_payload_integrity','installer_localization') }
     else { throw 'Unknown provenance component.' }
 }
 
 function Get-LakeReleaseNotes {
-    @('MIT project files only; no proprietary Lake binaries or private evidence.',
+    @('PATCH ONLY. Lake Controller, Contour and other proprietary software are NOT included; a legitimate original installation and a license where required are necessary.',
         'No real Lake OFFLINE validation for this candidate; no field/hardware approval or proven FPS/leak fix.',
-        'Unsigned per-user installer; review Windows/EDR prompts according to local policy.')
+        'Unsigned per-user installer; review Windows/EDR prompts according to local policy.',
+        'Independent unofficial project, not endorsed by the manufacturer. MIT covers only the project files, not third-party software or trademarks.')
 }
 
 function Assert-LakeFields($Value,[string[]]$Names,[string]$Label) {

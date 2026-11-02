@@ -84,6 +84,7 @@ if (!$SkipTests) {
     Start-LakeBuildTests -Context $context -ArtifactDirectory $stage
     Invoke-LakeBuildTest -Context $context -Name installer_sandbox -Program $sandboxTest
     Invoke-LakeBuildTest -Context $context -Name installer_payload_integrity -Program (Join-Path $stage $product.SetupName) -Arguments @('--verify-payload')
+    Invoke-LakeBuildTest -Context $context -Name installer_localization -Program (Join-Path $stage $product.SetupName) -Arguments @('--verify-localization')
 }
 $null = Test-LakeOwnLinkSymbolRecord -RecordFile (Join-Path $symbols ($product.SetupName+'.link-symbols.json')) `
     -OutputFile (Join-Path $stage $product.SetupName) -BuildId $context.Document.BuildId

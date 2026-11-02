@@ -5,10 +5,17 @@ revisado, confira checksums/manifesto e mantenha o Lake fechado durante operaç�
 O Lake Controller **5.8 Build 007 legítimo e admitido por hash** precisa estar
 instalado para instalar/atualizar o patch. Nenhum produto proprietário é fornecido.
 
+**SOMENTE PATCH:** o Lake Controller não acompanha o instalador. São necessários
+o software original legítimo e licença quando exigida; projeto não oficial nem
+endossado pelo fabricante. O aviso PT/EN também acompanha o `LICENSE` no payload.
+Guia completo em inglês: [README.en.md](../README.en.md).
+
 ## Operação
 
 1. Abra `LakeWindowedFix-Setup-v0.7.0.exe`. O setup procura a instalação padrão;
    **Localizar Lake** permite selecionar outra pasta. Hash diferente é recusado.
+   O campo **Idioma / Language** permite **Português (Brasil)** ou **English**.
+   Também se pode usar `--lang pt-BR` ou `--lang en` com os modos do setup.
 2. Confira o destino e clique **Instalar**. Arquivos do patch e dois atalhos ficam
    no perfil do usuário; não há escrita na instalação original, elevação, scripts
    PowerShell, download ou mudança de política de segurança na máquina de destino.
@@ -46,6 +53,12 @@ os seis buffers MIT embutidos no EXE final sem GUI/instalação. O fluxo real de
 Apps/autorremoção e sua confirmação/handshake não foi executado; a evidência do
 engine não é alegada como cobertura desse processo. CMake com setup ON passou;
 MSVC local e workflow remoto ainda exigem evidência própria.
+
+As contagens acima são da rodada anterior à localização. O build localizado
+acrescenta checks bilingues no sandbox e exige `installer_localization`:
+`--verify-localization` valida catálogo, CLI e controles de janelas próprias
+ocultas na imagem final, sem instalação, pastas reais ou execução do Lake.
+Detalhes: [LOCALIZATION.md](LOCALIZATION.md).
 
 Comandos, BuildIds, testes e pendências: [VALIDATION-07.md](VALIDATION-07.md).
 Histórico 0.6 separado: [HISTORY.md](../HISTORY.md) e Git.

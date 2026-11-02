@@ -80,16 +80,24 @@ $notesFolder = Join-Path $root ('private\release-notes\'+[guid]::NewGuid().ToStr
 New-Item -ItemType Directory -Path $notesFolder | Out-Null
 $notes = Join-Path $notesFolder 'notes.md'
 [IO.File]::WriteAllText($notes,@"
-## Instalar
-Baixe **LakeWindowedFix-Setup-v$Version.exe**, abra com duplo clique, clique em **Instalar** e use o atalho **Lake Controller - Janela**.
-Requer Lake Controller 5.8 Build 007 original instalado. Sem comandos ou edicao manual de INI; instalacao apenas no perfil do usuario.
+## Somente patch / Patch only
+**O software Lake Controller NAO acompanha este pacote.** Lake Controller, Contour e demais arquivos proprietarios nao sao distribuidos. E necessaria uma instalacao original legitima do **Lake Controller 5.8 Build 007**, com licenca quando exigida. Projeto independente, nao oficial nem endossado pelo fabricante. MIT aplica-se somente aos arquivos proprios do patch, nao ao software ou as marcas de terceiros.
 
-## Limites
-**Candidata experimental; sem validacao real Lake OFFLINE desta candidata. Nao homologado para uso em campo/audio de producao.** Nao ha ganho sustentado de FPS nem correcao de vazamento comprovados. Instalador nao assinado; siga a politica local de seguranca.
+**Lake Controller software is NOT included.** This package contains only the patch; Lake Controller, Contour and other proprietary files are not redistributed. You need a legitimate original **Lake Controller 5.8 Build 007** installation and a license where required. This is an independent, unofficial project, not endorsed by the manufacturer. MIT covers only the patch's own files, not third-party software or trademarks.
 
-Os arquivos incluem somente o projeto MIT; nenhum binario proprietario, log, preset ou evidencia privada. O ZIP e a alternativa portatil para usuarios avancados. Confira **SHA256SUMS.txt** e **RELEASE-MANIFEST.json**.
+## Instalar / Install
+- Baixe **LakeWindowedFix-Setup-v$Version.exe**, feche o Lake, escolha **Portugues / English** no instalador e clique em **Instalar / Reparar**. Use o atalho **Lake Controller - Janela**. Instalacao somente no perfil do usuario; nao abre o Lake automaticamente.
+- Download **LakeWindowedFix-Setup-v$Version.exe**, close Lake, choose **Portugues / English** in setup and click **Install / Repair**. Use the **Lake Controller - Janela** shortcut. Per-user installation; setup never starts Lake automatically.
+- Se ja houver outra geracao do patch, use o setup externo com **--upgrade**. Para reverter a unica geracao anterior retida, **--rollback**. Nao remova recibos/journals manualmente para forcar a troca.
+- For an existing different patch generation, run the external setup with **--upgrade**. Use **--rollback** for the single retained previous generation. Do not delete receipts/journals to force an update.
+- Confira / Check **SHA256SUMS.txt** e / and **RELEASE-MANIFEST.json**. O ZIP portatil e opcional / The portable ZIP is optional.
 
-Fonte: commit $head. [Instalacao e remocao](https://github.com/$repository/blob/$tag/docs/SETUP.md) | [Validacao](https://github.com/$repository/blob/$tag/docs/PERFORMANCE.md).
+## Limites / Limitations
+**Experimental e nao assinado / Experimental and unsigned.** Siga a politica Windows/EDR; nao desative protecoes / Follow Windows/EDR policy; do not disable protections. Sem homologacao de audio/hardware, promessa de FPS ou vazamento corrigido / No audio/hardware approval, FPS promise or proven leak fix. Teste isolado sem equipamentos em operacao; OFFLINE nao isola a rede / Test in isolation without operational equipment; OFFLINE does not isolate the network.
+
+O usuario relatou um teste local positivo do candidato anterior; nao e medicao independente nem validacao do instalador localizado ou do computador de destino. / The user reported a positive local smoke test of the previous candidate; this is not an independent measurement or validation of the localized installer or destination computer.
+
+Fonte / Source: commit $head. [Portugues](https://github.com/$repository/blob/$tag/README.md) | [English](https://github.com/$repository/blob/$tag/README.en.md) | [Validation / Validacao](https://github.com/$repository/blob/$tag/docs/VALIDATION-07.md).
 "@,[Text.UTF8Encoding]::new($false))
 $arguments = @('release','create',$tag,'--repo',$ghRepository,'--verify-tag','--title',"Lake Controller Windowed Fix $Version (experimental)",
     '--notes-file',$notes,'--prerelease','--latest=false')

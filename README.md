@@ -1,5 +1,19 @@
 # Lake Controller 5.8 — Windowed Fix
 
+[Português](README.md) | [English](README.en.md)
+
+> **SOMENTE PATCH — o software Lake Controller não acompanha este pacote.**
+> Lake Controller, Contour e demais arquivos proprietários não são distribuídos.
+> É necessária uma instalação original legítima e licença quando exigida.
+> Projeto independente, não oficial nem endossado pelo fabricante. A licença MIT
+> cobre somente os arquivos próprios deste projeto, não o software ou as marcas
+> de terceiros. [Aviso em português e inglês](NOTICE.md).
+
+O aviso também acompanha o arquivo `LICENSE` do ZIP e do payload do instalador.
+
+[Baixar instalador Windows v0.7.0](https://github.com/gabrielpgava/fix-lake-controller-5.8/releases/download/v0.7.0/LakeWindowedFix-Setup-v0.7.0.exe)
+· [Release, ZIP e checksums](https://github.com/gabrielpgava/fix-lake-controller-5.8/releases/tag/v0.7.0)
+
 Shim **experimental, x86**, restrito ao **Lake Controller 5.8 Build 007** pelos
 hashes admitidos. Não altera executáveis proprietários no disco, licença,
 firmware, presets, backend de áudio nem resolução/cor global do Windows.
@@ -11,7 +25,9 @@ do cache de apresentação, diagnóstico limitado e recuperação de instalaçã
 Builds passam a registrar sua própria proveniência; pacotes antigos não recebem
 a identidade do HEAD atual. [Implementação e pendências](docs/IMPLEMENTATION.md).
 
-**Não houve novo ensaio do Lake real nem de áudio/hardware nesta revisão.**
+**Não houve ensaio independente do Lake real nem de áudio/hardware nesta revisão.**
+O usuário relatou um teste local positivo do candidato anterior (`8949dac`);
+isso não valida automaticamente o instalador localizado ou outro computador.
 Matemática, fixtures Win32/COM e sandbox não aprovam GPU, controles proprietários
 ou sessões longas. Ensaios históricos estão separados em [HISTORY.md](HISTORY.md).
 Resultados e comandos desta candidata: [VALIDATION-07.md](docs/VALIDATION-07.md).
@@ -22,7 +38,8 @@ Resultados e comandos desta candidata: [VALIDATION-07.md](docs/VALIDATION-07.md)
    revisão não publica release automaticamente. Candidato de desenvolvimento é
    **não assinado**; não desative Windows/EDR para executá-lo.
 2. Feche o Lake. No setup, confira a compatibilidade e selecione **Instalar**.
-   O software original legítimo deve estar instalado; outro hash é recusado.
+    O software original legítimo deve estar instalado; outro hash é recusado.
+    Escolha **Português (Brasil)** ou **English** no campo **Idioma / Language**.
 3. Abra pelo atalho **Lake Controller - Janela**. Comece em ambiente isolado,
    sem áudio ativo/equipamentos sob controle. O setup não inicia o Lake sozinho.
 4. Para remover, use a entrada do patch em Aplicativos ou o setup externo.
@@ -32,6 +49,17 @@ Resultados e comandos desta candidata: [VALIDATION-07.md](docs/VALIDATION-07.md)
 Reparo, atualização, rollback e recuperação: [SETUP-RECOVERY.md](docs/SETUP-RECOVERY.md).
 Não use a instalação operacional como sandbox. **OFFLINE não isola a rede**:
 isolamento real precisa ser estabelecido pelo operador fora do aplicativo.
+
+Se já houver outra geração do patch instalada, use o setup externo:
+
+```powershell
+.\LakeWindowedFix-Setup-v0.7.0.exe --upgrade --lang pt-BR
+```
+
+Também são aceitos `--lang en`, `--check`, `--uninstall` e `--rollback`.
+O idioma inicial acompanha o Windows (português → Português; demais → English),
+sem alterar o idioma do sistema. Botões de diálogos nativos do Windows continuam
+seguindo o próprio Windows. Caminhos/atalhos históricos são mantidos por compatibilidade.
 
 ### Portátil
 
@@ -104,7 +132,7 @@ make release-check ZIG=C:/tools/zig/zig.exe OBJCOPY=C:/tools/LLVM/bin/llvm-objco
 **não publica, cria tag nem faz upload**. `make publish-check` é o preflight de
 publicação separado, mantendo a guarda `HEAD == origin/main`. Não faça merge apenas
 para aprovar candidato. `make release`/`release-draft` são operações remotas explícitas,
-fora desta entrega. [Proveniência, sequência e recuperação](docs/BUILD-PROVENANCE.md).
+separadas do build. [Proveniência, sequência e recuperação](docs/BUILD-PROVENANCE.md).
 
 MSVC: Developer PowerShell x86 + CMake/SDK, `Build.ps1 -Toolchain MSVC`; setup fase
 dois com `Build-Installer.ps1 -Toolchain MSVC -AllowUnsignedDevelopment`.

@@ -89,18 +89,20 @@ DWORD LastErrorOr(DWORD fallback = ERROR_INVALID_DATA) {
 
 bool Error(DWORD error) { SetLastError(error); return false; }
 
-Result Failure(const wchar_t* message, DWORD error = ERROR_INVALID_DATA) {
+Result Failure(TextId message, DWORD error = ERROR_INVALID_DATA) {
     Result result;
     result.error = error ? error : ERROR_INVALID_DATA;
-    result.message = message;
+    result.message = Text(message, Language::Portuguese);
+    result.messageEnglish = Text(message, Language::English);
     SetLastError(result.error);
     return result;
 }
 
-Result Success(const wchar_t* message) {
+Result Success(TextId message) {
     Result result;
     result.ok = true;
-    result.message = message;
+    result.message = Text(message, Language::Portuguese);
+    result.messageEnglish = Text(message, Language::English);
     return result;
 }
 
@@ -329,30 +331,30 @@ bool Running(bool& running) {
 
 Result CheckStopped() {
     bool running = false;
-    if (!Running(running)) return Failure(L"Não foi possível verificar se o Lake Controller está fechado.", LastErrorOr());
-    if (running) return Failure(L"Feche o Lake Controller antes de instalar ou remover o modo janela.", ERROR_BUSY);
-    return Success(L"");
+    if (!Running(running)) return Failure(TextId::CannotCheckStopped, LastErrorOr());
+    if (running) return Failure(TextId::CloseLake, ERROR_BUSY);
+    return Success(TextId::None);
 }
 
 Result ReadApplication(const std::wstring& directory, const SupportedBuild& build,
                        Handle& executableFile, Handle& rendererFile) {
     std::wstring app, executableHash, rendererHash;
     if (!Normalize(directory, app) || !PathSafe(app, true, false))
-        return Failure(L"Selecione a pasta original do Lake Controller em um caminho local absoluto, sem links.", LastErrorOr());
+        return Failure(TextId::SelectOriginalFolder, LastErrorOr());
     if (!Digest(build.executableSha256, executableHash) || !Digest(build.rendererSha256, rendererHash))
-        return Failure(L"A identificação da versão suportada é inválida.");
+        return Failure(TextId::InvalidBuildIdentity);
     BY_HANDLE_FILE_INFORMATION executableInfo{}, rendererInfo{};
     if (!OpenRegular(Join(app, kApplicationName), GENERIC_READ, executableFile, executableInfo))
-        return Failure(L"Não foi possível ler Lake Controller.exe na pasta selecionada.", LastErrorOr());
+        return Failure(TextId::CannotReadApplication, LastErrorOr());
     if (!OpenRegular(Join(app, kRendererName), GENERIC_READ, rendererFile, rendererInfo))
-        return Failure(L"Não foi possível ler Contour.dll na pasta selecionada.", LastErrorOr());
+        return Failure(TextId::CannotReadRenderer, LastErrorOr());
     const std::wstring executable = HashHandle(executableFile.get());
-    if (executable.empty()) return Failure(L"Não foi possível verificar Lake Controller.exe.", LastErrorOr());
+    if (executable.empty()) return Failure(TextId::CannotVerifyApplication, LastErrorOr());
     const std::wstring renderer = HashHandle(rendererFile.get());
-    if (renderer.empty()) return Failure(L"Não foi possível verificar Contour.dll.", LastErrorOr());
+    if (renderer.empty()) return Failure(TextId::CannotVerifyRenderer, LastErrorOr());
     if (executable != executableHash || renderer != rendererHash)
-        return Failure(L"Esta versão do Lake Controller não é suportada. Nenhum arquivo original foi alterado.", ERROR_REVISION_MISMATCH);
-    return Success(L"Versão original verificada (somente leitura).");
+        return Failure(TextId::UnsupportedBuild, ERROR_REVISION_MISMATCH);
+    return Success(TextId::OriginalVerified);
 }
 
 bool TreeSafe(const std::wstring& directory, unsigned depth = 0, std::size_t* visited = nullptr) {
@@ -944,7 +946,7 @@ struct VerifiedInstallation {
     std::array<LockedFile, kPayloadCount + 3> files; // Payloads, manager, desktop, programs.
     bool editedConfiguration = false;
     bool preservedFiles = false;
-    std::vector<std::wstring> preservedLabels; // Fixed own names/roles, never enumerate private user files.
+    std::vector<std::pair<std::wstring, std::wstring>> preservedLabels; // Own names/roles, not private file enumeration.
     RegistrationState registration = RegistrationState::Missing;
 };
 
@@ -987,10 +989,10 @@ bool VerifyObjects(const Locations& locations, bool removing, VerifiedInstallati
         if (file.hash != expected) {
             if (configuration) {
                 installation.editedConfiguration = true;
-                installation.preservedLabels.emplace_back(L"LakeWindowedFix.ini (editado)");
+                installation.preservedLabels.emplace_back(Text(TextId::EditedIni, Language::Portuguese), Text(TextId::EditedIni, Language::English));
             } else {
                 installation.preservedFiles = true;
-                installation.preservedLabels.emplace_back(name);
+                installation.preservedLabels.emplace_back(name, name);
             }
         } else if (removing && !UpgradeDeletion(file)) return false;
     }
@@ -1009,23 +1011,24 @@ bool VerifyObjects(const Locations& locations, bool removing, VerifiedInstallati
             : ShortcutMatches(path, locations, installation.manifest.app, true);
         if (!owned) {
             installation.preservedFiles = true;
-            installation.preservedLabels.emplace_back(i == 0 ? L"atalho da area de trabalho" : L"atalho do menu Iniciar");
+            const auto role = i == 0 ? TextId::DesktopShortcut : TextId::StartShortcut;
+            installation.preservedLabels.emplace_back(Text(role, Language::Portuguese), Text(role, Language::English));
         }
         else if (removing && !UpgradeDeletion(shortcut)) return false;
     }
     if (!InspectRegistration(locations, installation.manifest.version, installation.registration)) return false;
     if (installation.registration == RegistrationState::Foreign) {
         installation.preservedFiles = true;
-        installation.preservedLabels.emplace_back(L"registro de remocao alterado");
+        installation.preservedLabels.emplace_back(Text(TextId::ModifiedRegistration, Language::Portuguese), Text(TextId::ModifiedRegistration, Language::English));
     }
     return true;
 }
 
-std::wstring PreservedSummary(const VerifiedInstallation& installation) {
+std::wstring PreservedSummary(const VerifiedInstallation& installation, Language language) {
     std::wstring result;
     for (const auto& label : installation.preservedLabels) {
-        result += result.empty() ? L"\r\nObjetos conhecidos preservados: " : L"; ";
-        result += label;
+        result += result.empty() ? Text(TextId::PreservedObjects, language) : L"; ";
+        result += language == Language::Portuguese ? label.first : label.second;
     }
     return result;
 }
@@ -1274,7 +1277,7 @@ bool MigrateConfiguration(const Locations& locations, const std::wstring& receip
     return RecoverMigration(locations, receiptHash, migrated);
 }
 
-Result PendingFailure(const wchar_t* message, DWORD error) {
+Result PendingFailure(TextId message, DWORD error) {
     Result result = Failure(message, error);
     result.recoveryPending = true;
     return result;
@@ -1522,7 +1525,8 @@ bool RegistryUpgradeState(const Locations& locations, const UpgradePlan& plan, b
     if (!locations.registerUninstall) return true;
     const std::wstring base = RegistryKey(locations);
     const std::wstring oldVersion = plan.oldManifest.version, newVersion = plan.newManifest.version;
-    RegistrationState old, next, previous, activeNew, undo;
+    RegistrationState old = RegistrationState::Foreign, next = RegistrationState::Foreign,
+        previous = RegistrationState::Foreign, activeNew = RegistrationState::Foreign, undo = RegistrationState::Foreign;
     if (!InspectRegistrationAt(locations, base, oldVersion, old) || !InspectRegistrationAt(locations, base, newVersion, activeNew) ||
         !InspectRegistrationAt(locations, base + L".next", newVersion, next) ||
         !InspectRegistrationAt(locations, base + L".previous", oldVersion, previous) ||
@@ -1634,18 +1638,18 @@ bool VerifyUpgradeTarget(const Locations& locations, const UpgradePlan& plan, bo
 Result ResumeUpgrade(const Locations& locations, UpgradePlan& plan, bool rollback) {
     bool committed = false, intent = false, reverted = false;
     if (!UpgradeMarker(locations, plan, L"committed", false, committed) || !UpgradeMarker(locations, plan, L"rollback", false, intent) ||
-        !UpgradeMarker(locations, plan, L"reverted", false, reverted)) return PendingFailure(L"Marcador de atualização desconhecido. Nada foi substituído.", LastErrorOr());
+        !UpgradeMarker(locations, plan, L"reverted", false, reverted)) return PendingFailure(TextId::UnknownUpgradeMarker, LastErrorOr());
     if (!rollback && intent) {
         if (reverted) {
-            Result result = Failure(L"Rollback já concluído. O histórico foi preservado; reaplicar/rotacionar esta geração ainda não é suportado.", ERROR_NOT_SUPPORTED);
+            Result result = Failure(TextId::RollbackTerminal, ERROR_NOT_SUPPORTED);
             result.updateBlocked = true;
             return result;
         }
-        return PendingFailure(L"Rollback solicitado. Conclua com --rollback antes de outra operação.", ERROR_BUSY);
+        return PendingFailure(TextId::CompleteRollbackFirst, ERROR_BUSY);
     }
     if ((!rollback && committed) || (rollback && reverted)) {
-        if (!VerifyUpgradeTarget(locations, plan, rollback)) return Failure(L"O estado concluído foi alterado. Os arquivos atuais e o histórico foram preservados.", LastErrorOr());
-        Result result = Success(rollback ? L"A versão anterior já foi restaurada. Configuração e logs mantidos." : L"A atualização já foi concluída.");
+        if (!VerifyUpgradeTarget(locations, plan, rollback)) return Failure(TextId::CompletedStateChanged, LastErrorOr());
+        Result result = Success(rollback ? TextId::AlreadyRolledBack : TextId::AlreadyUpgraded);
         result.alreadyInstalled = true;
         result.rolledBack = rollback; result.upgraded = !rollback;
         return result;
@@ -1653,38 +1657,37 @@ Result ResumeUpgrade(const Locations& locations, UpgradePlan& plan, bool rollbac
     {
         std::array<UpgradeSwap, kUpgradeSlots> swaps;
         if (!PreflightUpgrade(locations, plan, rollback, swaps))
-            return PendingFailure(L"Há arquivo/atalho/registro alterado no estado ativo ou no staging. Foi preservado; promoção/rollback recusado.", LastErrorOr());
+            return PendingFailure(TextId::ModifiedActiveOrStage, LastErrorOr());
         Result stopped = CheckStopped();
         if (!stopped.ok) return stopped;
         Transaction directories;
         for (const std::wstring& directory : {locations.desktopDirectory, locations.programsDirectory})
             if (!EnsureDirectory(directories, directory))
-                return PendingFailure(L"Não foi possível recriar a pasta de um atalho ausente.", LastErrorOr());
+                return PendingFailure(TextId::CannotRecreateShortcutFolder, LastErrorOr());
         directories.committed = true;
         if (rollback && !intent) {
             if (!UpgradeMarker(locations, plan, L"rollback", true, intent) || !Checkpoint(locations, L"rollback-requested"))
-                return PendingFailure(L"Pedido de rollback registrado. Execute --rollback novamente para continuar.", LastErrorOr());
+                return PendingFailure(TextId::RollbackRequested, LastErrorOr());
         }
         // Runtime/INI/links first; registry, manager, removal intent and receipt
         // last. Every rename is no-replace and every original stays archived.
         for (std::size_t i = 0; i < kUpgradeSlots; ++i) {
             if (i == kUpgradeManager || i >= kUpgradeRemoval) continue;
             if (!SwapUpgradeSlot(locations, plan, swaps[i], i, rollback))
-                return PendingFailure(L"Troca interrompida. Mantenha o Lake fechado; retome --upgrade ou solicite --rollback.", LastErrorOr());
+                return PendingFailure(TextId::SwapInterrupted, LastErrorOr());
         }
         if (!PromoteRegistration(locations, plan, rollback))
-            return PendingFailure(L"Troca do registro interrompida; manager e recibos permanecem recuperáveis.", LastErrorOr());
+            return PendingFailure(TextId::RegistrySwapInterrupted, LastErrorOr());
         for (std::size_t i : {kUpgradeManager, kUpgradeRemoval, kUpgradeReceipt})
             if (!SwapUpgradeSlot(locations, plan, swaps[i], i, rollback))
-                return PendingFailure(L"Confirmação de versão interrompida. Use --upgrade/--rollback para recuperar.", LastErrorOr());
+                return PendingFailure(TextId::VersionConfirmationInterrupted, LastErrorOr());
     }
-    if (!VerifyUpgradeTarget(locations, plan, rollback)) return PendingFailure(L"A verificação da versão promovida falhou. Histórico anterior mantido.", LastErrorOr());
+    if (!VerifyUpgradeTarget(locations, plan, rollback)) return PendingFailure(TextId::PromotedVerificationFailed, LastErrorOr());
     bool complete = false;
     if (!UpgradeMarker(locations, plan, rollback ? L"reverted" : L"committed", true, complete) ||
         !Checkpoint(locations, rollback ? L"rollback-committed" : L"upgrade-committed"))
-        return PendingFailure(L"A troca terminou, mas a confirmação foi interrompida. Execute a mesma operação novamente.", LastErrorOr());
-    Result result = Success(rollback ? L"Versão anterior restaurada. INI atual, logs e histórico da atualização preservados."
-                                    : L"Atualização concluída. Configuração migrada sem trocar edições; versão anterior preservada para --rollback.");
+        return PendingFailure(TextId::CommitConfirmationInterrupted, LastErrorOr());
+    Result result = Success(rollback ? TextId::RollbackComplete : TextId::UpgradeComplete);
     result.upgraded = !rollback; result.rolledBack = rollback;
     result.preservedConfiguration = true;
     return result;
@@ -1756,8 +1759,8 @@ Result ValidateApplication(const std::wstring& appDirectory, const SupportedBuil
 
 Result VerifyPayload(const PayloadFile* files, std::size_t count) {
     Payloads checked;
-    return CheckPayloads(files, count, checked) ? Success(L"Os seis payloads embutidos têm nomes e SHA-256 válidos.")
-        : Failure(L"Payload embutido inválido: nome, contagem ou SHA-256 não confere.", LastErrorOr());
+    return CheckPayloads(files, count, checked) ? Success(TextId::PayloadVerified)
+        : Failure(TextId::InvalidEmbeddedPayload, LastErrorOr());
 }
 
 Result Upgrade(const Locations& input, const std::wstring& appDirectory,
@@ -1765,46 +1768,46 @@ Result Upgrade(const Locations& input, const std::wstring& appDirectory,
     Result stopped = CheckStopped();
     if (!stopped.ok) return stopped;
     Payloads payloads;
-    if (!CheckPayloads(files, count, payloads)) return Failure(L"Payload da atualização inválido.", LastErrorOr());
+    if (!CheckPayloads(files, count, payloads)) return Failure(TextId::InvalidUpgradePayload, LastErrorOr());
     std::wstring app, setup, selectedApp = appDirectory;
     Locations locations;
-    if (!CheckLocations(input, L"", locations)) return Failure(L"Destinos da atualização inválidos.", LastErrorOr());
+    if (!CheckLocations(input, L"", locations)) return Failure(TextId::InvalidUpgradeDestinations, LastErrorOr());
     if (selectedApp.empty()) {
         const DWORD attributes = GetFileAttributesW(UpgradePath(locations, L"plan.ini").c_str());
         if (attributes != INVALID_FILE_ATTRIBUTES) {
             UpgradePlan recorded;
-            if (!LoadUpgradePlan(locations, recorded)) return Failure(L"Não foi possível ler o Lake registrado no journal.", LastErrorOr());
+            if (!LoadUpgradePlan(locations, recorded)) return Failure(TextId::CannotReadJournalApplication, LastErrorOr());
             selectedApp = recorded.newManifest.app;
         } else {
             VerifiedInstallation recorded;
-            if (!ReadReceipt(locations, recorded)) return Failure(L"Não foi possível ler a pasta original do recibo.", LastErrorOr());
+            if (!ReadReceipt(locations, recorded)) return Failure(TextId::CannotReadReceiptApplication, LastErrorOr());
             selectedApp = recorded.manifest.app;
         }
     }
-    if (!Normalize(selectedApp, app) || !Normalize(setupExecutable, setup)) return Failure(L"Caminho da atualização inválido.", LastErrorOr());
+    if (!Normalize(selectedApp, app) || !Normalize(setupExecutable, setup)) return Failure(TextId::InvalidUpgradePath, LastErrorOr());
     Handle executable, renderer, manager;
     Result application = ReadApplication(app, build, executable, renderer);
     if (!application.ok) return application;
     if (!CheckLocations(input, app, locations) || !ManagerIsExternal(locations) || Within(setup, locations.installDirectory) || Within(setup, app))
-        return Failure(L"Execute o setup novo fora da pasta instalada/original para atualizar; mantenha o Lake fechado.", LastErrorOr(ERROR_BUSY));
+        return Failure(TextId::ExternalUpgradeRequired, LastErrorOr(ERROR_BUSY));
     BY_HANDLE_FILE_INFORMATION info{};
-    if (!OpenRegular(setup, GENERIC_READ, manager, info)) return Failure(L"Não foi possível ler o setup novo.", LastErrorOr());
+    if (!OpenRegular(setup, GENERIC_READ, manager, info)) return Failure(TextId::CannotReadNewSetup, LastErrorOr());
     const std::wstring managerHash = HashHandle(manager.get());
     if (managerHash.empty() || EqualPath(managerHash, build.executableSha256) || EqualPath(managerHash, build.rendererSha256))
-        return Failure(L"O gerenciador da atualização é inválido.", ERROR_INVALID_DATA);
+        return Failure(TextId::InvalidUpgradeManager, ERROR_INVALID_DATA);
     Apartment apartment;
-    if (!apartment.ok()) return Failure(L"Não foi possível preparar os atalhos.", apartment.error());
+    if (!apartment.ok()) return Failure(TextId::CannotPrepareShortcuts, apartment.error());
     DirectoryPins pins;
     for (const std::wstring& directory : {locations.installDirectory, locations.desktopDirectory, locations.programsDirectory})
-        if (!pins.existingAncestors(directory)) return Failure(L"Não foi possível proteger os caminhos da atualização.", LastErrorOr());
-    if (!TreeSafe(locations.installDirectory)) return Failure(L"A pasta da atualização contém caminho inseguro.", LastErrorOr());
+        if (!pins.existingAncestors(directory)) return Failure(TextId::CannotPinUpgradePaths, LastErrorOr());
+    if (!TreeSafe(locations.installDirectory)) return Failure(TextId::UnsafeUpgradeFolder, LastErrorOr());
     const std::wstring directory = Join(locations.installDirectory, kUpgradeDirectoryName);
     const DWORD attributes = GetFileAttributesW(directory.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
-        if (!Missing(GetLastError())) return Failure(L"Não foi possível verificar o staging.", LastErrorOr());
+        if (!Missing(GetLastError())) return Failure(TextId::CannotInspectStaging, LastErrorOr());
         {
             VerifiedInstallation old;
-            if (!ReadReceipt(locations, old) || !EqualPath(old.manifest.app, app)) return Failure(L"Recibo anterior inválido ou pertencente a outro Lake.", LastErrorOr());
+            if (!ReadReceipt(locations, old) || !EqualPath(old.manifest.app, app)) return Failure(TextId::InvalidPreviousReceipt, LastErrorOr());
             if (old.manifest.schema == 2 && old.manifest.version == kVersion && old.manifest.managerHash == managerHash &&
                 old.manifest.hashes == payloads.hashes) {
                 // Do not consume the one retained rollback generation for a
@@ -1814,13 +1817,13 @@ Result Upgrade(const Locations& input, const std::wstring& appDirectory,
             }
         }
         if (!PrepareUpgrade(locations, payloads, manager.get(), managerHash))
-            return PendingFailure(L"Preparação da atualização interrompida. A versão ativa não foi substituída; execute --upgrade novamente.", LastErrorOr());
+            return PendingFailure(TextId::UpgradePreparationInterrupted, LastErrorOr());
     }
-    if (!pins.existingAncestors(directory)) return Failure(L"Não foi possível proteger o journal da atualização.", LastErrorOr());
+    if (!pins.existingAncestors(directory)) return Failure(TextId::CannotPinUpgradeJournal, LastErrorOr());
     UpgradePlan plan;
-    if (!LoadUpgradePlan(locations, plan)) return PendingFailure(L"Journal/arquivos da atualização desconhecidos ou alterados. Nada foi adotado.", LastErrorOr());
+    if (!LoadUpgradePlan(locations, plan)) return PendingFailure(TextId::UnknownUpgradeFiles, LastErrorOr());
     if (!EqualPath(plan.newManifest.app, app) || plan.newManifest.managerHash != managerHash || plan.newManifest.hashes != payloads.hashes)
-        return Failure(L"Este histórico pertence a outro pacote. Use o mesmo setup para retomar ou --rollback para reverter.", ERROR_REVISION_MISMATCH);
+        return Failure(TextId::DifferentUpgradePackage, ERROR_REVISION_MISMATCH);
     return ResumeUpgrade(locations, plan, false);
 }
 
@@ -1829,16 +1832,16 @@ Result Rollback(const Locations& input) {
     if (!stopped.ok) return stopped;
     Locations locations;
     if (!CheckLocations(input, L"", locations) || !ManagerIsExternal(locations))
-        return Failure(L"Execute --rollback pelo setup externo, fora da pasta instalada.", LastErrorOr(ERROR_BUSY));
+        return Failure(TextId::ExternalRollbackRequired, LastErrorOr(ERROR_BUSY));
     Apartment apartment;
-    if (!apartment.ok()) return Failure(L"Não foi possível verificar os atalhos.", apartment.error());
+    if (!apartment.ok()) return Failure(TextId::CannotCheckShortcuts, apartment.error());
     DirectoryPins pins;
     for (const std::wstring& directory : {locations.installDirectory, locations.desktopDirectory, locations.programsDirectory,
                                         Join(locations.installDirectory, kUpgradeDirectoryName)})
-        if (!pins.existingAncestors(directory)) return Failure(L"Não foi possível proteger os caminhos do rollback.", LastErrorOr());
-    if (!TreeSafe(locations.installDirectory)) return Failure(L"Rollback recusado: caminho inseguro.", LastErrorOr());
+        if (!pins.existingAncestors(directory)) return Failure(TextId::CannotPinRollbackPaths, LastErrorOr());
+    if (!TreeSafe(locations.installDirectory)) return Failure(TextId::UnsafeRollbackPath, LastErrorOr());
     UpgradePlan plan;
-    if (!LoadUpgradePlan(locations, plan)) return Failure(L"Não há histórico de atualização íntegro para reverter.", LastErrorOr());
+    if (!LoadUpgradePlan(locations, plan)) return Failure(TextId::NoValidUpgradeHistory, LastErrorOr());
     return ResumeUpgrade(locations, plan, true);
 }
 
@@ -1849,9 +1852,9 @@ Result Install(const Locations& input, const std::wstring& appDirectory,
     if (!stopped.ok) return stopped;
     Payloads payloads;
     if (!CheckPayloads(files, count, payloads))
-        return Failure(L"Os arquivos do instalador são inválidos ou estão corrompidos.", LastErrorOr());
+        return Failure(TextId::InvalidInstallerFiles, LastErrorOr());
     std::wstring app, setup;
-    if (!Normalize(appDirectory, app)) return Failure(L"A pasta original deve ser um caminho local absoluto, sem '..'.", LastErrorOr());
+    if (!Normalize(appDirectory, app)) return Failure(TextId::AbsoluteOriginalPathRequired, LastErrorOr());
     // Keep both read-only original handles throughout installation so the build
     // cannot be replaced after it has been checked. No app directory is written.
     Handle originalExecutable, originalRenderer;
@@ -1859,55 +1862,56 @@ Result Install(const Locations& input, const std::wstring& appDirectory,
     if (!application.ok) return application;
     Locations locations;
     if (!CheckLocations(input, app, locations))
-        return Failure(L"As pastas de instalação e atalhos devem ser distintas, sem links e fora da pasta original, do Windows e de Program Files.", LastErrorOr());
-    if (UpgradePending(locations)) return PendingFailure(L"Há atualização/rollback pendente. Use --upgrade ou --rollback antes de instalar/reparar.", ERROR_BUSY);
-    if (!Normalize(setupExecutable, setup)) return Failure(L"O caminho do instalador é inválido.", LastErrorOr());
+        return Failure(TextId::InvalidInstallDestinations, LastErrorOr());
+    if (UpgradePending(locations)) return PendingFailure(TextId::PendingUpgradeBeforeRepair, ERROR_BUSY);
+    if (!Normalize(setupExecutable, setup)) return Failure(TextId::InvalidInstallerPath, LastErrorOr());
     if (Within(setup, app))
-        return Failure(L"O gerenciador deve ser o próprio instalador, fora da pasta original do Lake. Nenhum arquivo proprietário será copiado.", ERROR_BAD_PATHNAME);
+        return Failure(TextId::OwnManagerRequired, ERROR_BAD_PATHNAME);
     Handle source;
     BY_HANDLE_FILE_INFORMATION sourceInfo{};
     if (!OpenRegular(setup, GENERIC_READ, source, sourceInfo))
-        return Failure(L"Não foi possível ler o próprio instalador.", LastErrorOr());
+        return Failure(TextId::CannotReadSelf, LastErrorOr());
     const std::wstring managerHash = HashHandle(source.get());
-    if (managerHash.empty()) return Failure(L"Não foi possível verificar o próprio instalador.", LastErrorOr());
+    if (managerHash.empty()) return Failure(TextId::CannotVerifySelf, LastErrorOr());
     if (EqualPath(managerHash, build.executableSha256) || EqualPath(managerHash, build.rendererSha256))
-        return Failure(L"Um arquivo original do Lake não pode ser usado como gerenciador de instalação.", ERROR_INVALID_DATA);
+        return Failure(TextId::ProprietaryManagerRefused, ERROR_INVALID_DATA);
     Apartment apartment;
-    if (!apartment.ok()) return Failure(L"Não foi possível preparar os atalhos do Windows.", apartment.error());
+    if (!apartment.ok()) return Failure(TextId::CannotPrepareWindowsShortcuts, apartment.error());
 
     Transaction transaction;
     for (const std::wstring& directory : {locations.installDirectory, locations.desktopDirectory, locations.programsDirectory})
         if (!transaction.pins.existingAncestors(directory))
-            return Failure(L"Não foi possível proteger as pastas contra alterações durante a instalação.", LastErrorOr());
+            return Failure(TextId::CannotPinInstallPaths, LastErrorOr());
 
     const DWORD attributes = GetFileAttributesW(locations.installDirectory.c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES) {
         VerifiedInstallation existing;
         if (!TreeSafe(locations.installDirectory) || !ReadReceipt(locations, existing))
-            return Failure(L"A pasta já existe sem um recibo de propriedade válido. Nada foi adotado ou sobrescrito.", LastErrorOr());
+            return Failure(TextId::UnownedFolder, LastErrorOr());
         if (!EqualPath(existing.manifest.app, app))
-            return Failure(L"Esta instalação pertence a outra pasta original do Lake. Nada foi alterado.");
+            return Failure(TextId::DifferentOriginalInstallation);
         bool compatible = existing.manifest.version == kVersion && existing.manifest.schema == 2 &&
             existing.manifest.managerHash == managerHash;
         for (std::size_t i = 0; i < kPayloadCount; ++i)
             if (i != kConfigurationIndex && existing.manifest.hashes[i] != payloads.hashes[i]) compatible = false;
         if (!compatible) {
-            Result result = Failure(L"Este pacote é diferente da instalação anterior. Use --upgrade explicitamente para atualizar com histórico e rollback.", ERROR_REVISION_MISMATCH);
+            Result result = Failure(TextId::ExplicitUpgradeRequired, ERROR_REVISION_MISMATCH);
             result.updateBlocked = true;
             return result;
         }
         if (!VerifyObjects(locations, false, existing))
-            return Failure(L"Não foi possível proteger os arquivos existentes. Nada foi sobrescrito.", LastErrorOr());
+            return Failure(TextId::CannotPinExistingFiles, LastErrorOr());
         if (existing.preservedFiles) {
-            Result result = Failure(L"Reparo recusado: há arquivo, atalho ou registro alterado/desconhecido. Foi preservado; somente ausências podem ser recriadas.", ERROR_CRC);
-            result.message += PreservedSummary(existing);
+            Result result = Failure(TextId::ModifiedRepairRefused, ERROR_CRC);
+            result.message += PreservedSummary(existing, Language::Portuguese);
+            result.messageEnglish += PreservedSummary(existing, Language::English);
             result.preservedFiles = true;
             return result;
         }
         LockedFile removal;
         bool created = false;
         if (!RemovalJournal(locations, existing.receipt.hash, false, removal, created))
-            return Failure(L"O marcador de remoção não corresponde ao recibo. Foi preservado.", LastErrorOr());
+            return Failure(TextId::RemovalMarkerMismatch, LastErrorOr());
         bool repaired = removal.handle.valid() || (locations.registerUninstall && existing.registration == RegistrationState::Missing);
         for (const auto& file : existing.files) if (!file.handle.valid()) repaired = true;
         stopped = CheckStopped();
@@ -1918,9 +1922,9 @@ Result Install(const Locations& input, const std::wstring& appDirectory,
         bool migrated = false;
         if (!RecoverMigration(locations, existing.receipt.hash, migrated) ||
             !MigrateConfiguration(locations, existing.receipt.hash, *payloads.files[kConfigurationIndex], migrated))
-            return PendingFailure(L"A configuração não pôde ser migrada com segurança. Originais/backup e journal foram preservados; execute novamente para recuperar.", LastErrorOr());
+            return PendingFailure(TextId::UnsafeConfigMigration, LastErrorOr());
         if (!LockOptional(Join(locations.installDirectory, kNames[kConfigurationIndex]), false, existing.files[kConfigurationIndex]))
-            return PendingFailure(L"Não foi possível verificar a configuração recuperada.", LastErrorOr());
+            return PendingFailure(TextId::CannotVerifyRecoveredConfig, LastErrorOr());
         for (std::size_t i = 0; i <= kPayloadCount; ++i) {
             if (existing.files[i].handle.valid()) continue;
             const bool manager = i == kPayloadCount;
@@ -1928,7 +1932,7 @@ Result Install(const Locations& input, const std::wstring& appDirectory,
             if (!WriteNew(transaction, Join(locations.installDirectory, manager ? kManagerName : kNames[i]),
                 manager ? nullptr : file->data, manager ? 0 : file->size,
                 manager ? managerHash : payloads.hashes[i], manager ? source.get() : INVALID_HANDLE_VALUE))
-                return Failure(L"O reparo não pôde recriar uma ausência. Somente os novos arquivos inalterados serão revertidos.", LastErrorOr());
+                return Failure(TextId::CannotRepairMissingFile, LastErrorOr());
         }
         const std::array<std::wstring, 2> directories = {{locations.desktopDirectory, locations.programsDirectory}};
         for (std::size_t i = 0; i < directories.size(); ++i) {
@@ -1937,13 +1941,13 @@ Result Install(const Locations& input, const std::wstring& appDirectory,
             const std::wstring hash = HashMemory(bytes.data(), bytes.size());
             if (hash.empty() || !EnsureDirectory(transaction, directories[i]) ||
                 !WriteNew(transaction, Join(directories[i], kShortcutName), bytes.data(), bytes.size(), hash))
-                return Failure(L"O reparo não pôde criar um atalho ausente. Nenhum atalho existente foi substituído.", LastErrorOr());
+                return Failure(TextId::CannotRepairShortcut, LastErrorOr());
         }
         if (existing.registration == RegistrationState::Missing && !CreateRegistration(transaction, locations))
-            return Failure(L"Não foi possível recriar o registro ausente; os novos arquivos serão revertidos.", LastErrorOr());
+            return Failure(TextId::CannotRepairRegistration, LastErrorOr());
         VerifiedInstallation complete;
         if (!ReadReceipt(locations, complete) || !VerifyObjects(locations, false, complete) || !InstallationComplete(locations, complete))
-            return Failure(L"A verificação do reparo falhou; apenas novas criações inalteradas serão revertidas.", LastErrorOr());
+            return Failure(TextId::RepairVerificationFailed, LastErrorOr());
         stopped = CheckStopped();
         if (!stopped.ok) return stopped;
         transaction.committed = true;
@@ -1951,10 +1955,8 @@ Result Install(const Locations& input, const std::wstring& appDirectory,
         // A failure here leaves either an installed tree + marker, or a complete
         // installed tree without marker; both are safely recognized next time.
         if (removal.handle.valid() && (!DeleteLocked(removal) || !Checkpoint(locations, L"removal-marker-cleared")))
-            return PendingFailure(L"Os arquivos foram reinstalados, mas a confirmação final foi interrompida. Execute novamente.", LastErrorOr());
-        Result result = Success(repaired || migrated
-            ? L"Instalação recuperada. Apenas arquivos/atalhos ausentes foram recriados; edições e dados pessoais foram preservados."
-            : L"O modo janela já está instalado. A configuração existente foi mantida.");
+            return PendingFailure(TextId::ReinstallConfirmationInterrupted, LastErrorOr());
+        Result result = Success(repaired || migrated ? TextId::RepairComplete : TextId::AlreadyInstalled);
         result.alreadyInstalled = !repaired && !migrated;
         result.repaired = repaired || migrated;
         result.configurationMigrated = migrated;
@@ -1962,19 +1964,19 @@ Result Install(const Locations& input, const std::wstring& appDirectory,
         if (result.repaired) NotifyShortcuts(locations, SHCNE_CREATE);
         return result;
     }
-    if (!Missing(GetLastError())) return Failure(L"Não foi possível verificar a pasta de instalação.", LastErrorOr());
+    if (!Missing(GetLastError())) return Failure(TextId::CannotInspectInstallFolder, LastErrorOr());
 
     if (!EnsureDirectory(transaction, Parent(locations.installDirectory)) ||
         !CreateDirectoryW(locations.installDirectory.c_str(), nullptr) ||
         !RecordDirectory(transaction, locations.installDirectory))
-        return Failure(L"Não foi possível criar uma pasta exclusiva para o modo janela.", LastErrorOr());
+        return Failure(TextId::CannotCreateInstallFolder, LastErrorOr());
     for (std::size_t i = 0; i < kPayloadCount; ++i) {
         const PayloadFile& file = *payloads.files[i];
         if (!WriteNew(transaction, Join(locations.installDirectory, kNames[i]), file.data, file.size, payloads.hashes[i]))
-            return Failure(L"Não foi possível gravar os arquivos próprios. A instalação foi cancelada sem sobrescrever arquivos existentes.", LastErrorOr());
+            return Failure(TextId::CannotWriteOwnFiles, LastErrorOr());
     }
     if (!WriteNew(transaction, Join(locations.installDirectory, kManagerName), nullptr, 0, managerHash, source.get()))
-        return Failure(L"Não foi possível copiar o gerenciador de instalação.", LastErrorOr());
+        return Failure(TextId::CannotCopyManager, LastErrorOr());
     Manifest manifest;
     manifest.app = app;
     manifest.managerHash = managerHash;
@@ -1984,67 +1986,67 @@ Result Install(const Locations& input, const std::wstring& appDirectory,
         auto& bytes = manifest.shortcuts[i];
         if (!EnsureDirectory(transaction, directories[i]) || !SerializeShortcut(locations, app, bytes) ||
             !WriteNew(transaction, Join(directories[i], kShortcutName), bytes.data(), bytes.size(), HashMemory(bytes.data(), bytes.size())))
-            return Failure(L"Não foi possível criar os atalhos. Um atalho já existente nunca será substituído.", LastErrorOr());
+            return Failure(TextId::CannotCreateShortcuts, LastErrorOr());
     }
     if (!WriteTextNew(transaction, Join(locations.installDirectory, kManifestName), ManifestText(locations, manifest)))
-        return Failure(L"Não foi possível gravar o recibo de propriedade da instalação.", LastErrorOr());
+        return Failure(TextId::CannotWriteReceipt, LastErrorOr());
     if (!CreateRegistration(transaction, locations))
-        return Failure(L"Não foi possível registrar a remoção para este usuário. Um registro preexistente não foi substituído.", LastErrorOr());
+        return Failure(TextId::CannotRegisterUninstall, LastErrorOr());
     VerifiedInstallation installed;
     if (!ReadReceipt(locations, installed) || !VerifyObjects(locations, false, installed) || !InstallationComplete(locations, installed))
-        return Failure(L"A verificação final falhou. Somente arquivos próprios ainda inalterados podem ser revertidos.", LastErrorOr());
+        return Failure(TextId::FinalVerificationFailed, LastErrorOr());
     stopped = CheckStopped();
     if (!stopped.ok) return stopped;
     transaction.committed = true;
     NotifyShortcuts(locations, SHCNE_CREATE);
-    return Success(L"Modo janela instalado. Use o atalho Lake Controller - Janela. O Lake original não foi alterado nem iniciado.");
+    return Success(TextId::InstallComplete);
 }
 
 Result Uninstall(const Locations& input, const PayloadFile* files, std::size_t count) {
     Result stopped = CheckStopped();
     if (!stopped.ok) return stopped;
     Payloads payloads;
-    if (!CheckPayloads(files, count, payloads)) return Failure(L"A identificação dos arquivos próprios é inválida.", LastErrorOr());
+    if (!CheckPayloads(files, count, payloads)) return Failure(TextId::InvalidOwnFileIdentity, LastErrorOr());
     Locations locations;
-    if (!CheckLocations(input, L"", locations)) return Failure(L"As pastas de remoção são inválidas ou se sobrepõem.", LastErrorOr());
-    if (UpgradePending(locations)) return PendingFailure(L"Há atualização/rollback pendente. Recupere com --upgrade ou --rollback antes de remover.", ERROR_BUSY);
+    if (!CheckLocations(input, L"", locations)) return Failure(TextId::InvalidRemovalFolders, LastErrorOr());
+    if (UpgradePending(locations)) return PendingFailure(TextId::PendingUpgradeBeforeRemoval, ERROR_BUSY);
     std::vector<wchar_t> module(32768);
     const DWORD length = GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
     std::wstring executable;
     if (!length || length >= module.size() || !Normalize(std::wstring(module.data(), length), executable))
-        return Failure(L"Não foi possível verificar o local do gerenciador de remoção.", LastErrorOr());
+        return Failure(TextId::CannotCheckRemovalManager, LastErrorOr());
     if (Within(executable, locations.installDirectory))
-        return Failure(L"A remoção deve ser executada pela cópia temporária do instalador, fora da pasta instalada.", ERROR_BUSY);
+        return Failure(TextId::ExternalRemovalRequired, ERROR_BUSY);
     Apartment apartment;
-    if (!apartment.ok()) return Failure(L"Não foi possível verificar os atalhos do Windows.", apartment.error());
+    if (!apartment.ok()) return Failure(TextId::CannotCheckWindowsShortcuts, apartment.error());
     DirectoryPins pins;
     if (!pins.existingAncestors(locations.installDirectory, true) ||
         !pins.existingAncestors(locations.desktopDirectory) || !pins.existingAncestors(locations.programsDirectory))
-        return Failure(L"Não foi possível proteger as pastas contra alterações durante a remoção. Nada foi removido.", LastErrorOr());
+        return Failure(TextId::CannotPinRemovalFolders, LastErrorOr());
     VerifiedInstallation installation;
     if (!TreeSafe(locations.installDirectory) || !ReadReceipt(locations, installation))
-        return Failure(L"A remoção foi recusada: recibo de propriedade inválido ou caminho inseguro. Nada foi removido.", LastErrorOr());
+        return Failure(TextId::InvalidRemovalReceipt, LastErrorOr());
     LockedFile journal;
     bool created = false;
     if (!RemovalJournal(locations, installation.receipt.hash, false, journal, created))
-        return Failure(L"O marcador de remoção é desconhecido e foi preservado. Nada foi removido.", LastErrorOr());
+        return Failure(TextId::UnknownRemovalMarker, LastErrorOr());
     bool migrated = false;
     if (!RecoverMigration(locations, installation.receipt.hash, migrated))
-        return PendingFailure(L"Há uma migração de configuração pendente. O backup e os journals foram mantidos; recupere antes de remover.", LastErrorOr());
+        return PendingFailure(TextId::PendingConfigMigration, LastErrorOr());
     if (!VerifyObjects(locations, true, installation))
-        return Failure(L"Não foi possível proteger os arquivos para remoção. Nada foi removido.", LastErrorOr());
+        return Failure(TextId::CannotPinRemovalFiles, LastErrorOr());
     // No original application hash is required here: removing our files must
     // remain possible after the original application has been moved/deleted.
     stopped = CheckStopped();
     if (!stopped.ok) return stopped;
     if (!TreeSafe(locations.installDirectory))
-        return Failure(L"A instalação mudou durante a verificação. Nada foi removido.", LastErrorOr());
+        return Failure(TextId::InstallationChanged, LastErrorOr());
 
     if (!journal.handle.valid()) {
         if (!RemovalJournal(locations, installation.receipt.hash, true, journal, created))
-            return Failure(L"Não foi possível gravar o journal de remoção. Nada foi removido.", LastErrorOr());
+            return Failure(TextId::CannotWriteRemovalJournal, LastErrorOr());
         if (!Checkpoint(locations, L"removal-prepared"))
-            return PendingFailure(L"Remoção interrompida antes das exclusões. Execute novamente para retomar.", LastErrorOr());
+            return PendingFailure(TextId::RemovalBeforeDeletionInterrupted, LastErrorOr());
     }
     // The immutable receipt and intent marker are NEVER removed by uninstall.
     // All unchanged objects are pinned; absence is accepted on every retry.
@@ -2053,30 +2055,29 @@ Result Uninstall(const Locations& input, const PayloadFile* files, std::size_t c
         if (i == kPayloadCount) continue;
         LockedFile& file = installation.files[i];
         if (file.handle.valid() && file.remove && (!DeleteLocked(file) || !Checkpoint(locations, L"owned-file-removed")))
-            return PendingFailure(L"Remoção parcial: recibo, journal e gerenciador foram mantidos. Execute novamente; ausências não bloqueiam a recuperação.", LastErrorOr());
+            return PendingFailure(TextId::PartialRemovalInterrupted, LastErrorOr());
     }
     if (locations.registerUninstall) {
         // A foreign/modified value or a new subkey is never recursively removed.
         RegistrationState state;
         if (!InspectRegistration(locations, installation.manifest.version, state))
-            return PendingFailure(L"O registro não pôde ser verificado. O gerenciador e o journal foram mantidos.", LastErrorOr());
+            return PendingFailure(TextId::CannotVerifyRemovalRegistration, LastErrorOr());
         if (state == RegistrationState::Foreign) installation.preservedFiles = true;
         if (state == RegistrationState::Owned) {
             const LSTATUS status = RegDeleteKeyW(HKEY_CURRENT_USER, RegistryKey(locations).c_str());
             if (status != ERROR_SUCCESS && !Missing(status))
-                return PendingFailure(L"O registro de remoção foi preservado; o gerenciador permite tentar novamente.", status);
+                return PendingFailure(TextId::RemovalRegistrationPreserved, status);
         }
     }
     LockedFile& manager = installation.files[kPayloadCount];
     if (manager.handle.valid() && manager.remove && (!DeleteLocked(manager) || !Checkpoint(locations, L"manager-removed-last")))
-        return PendingFailure(L"A etapa final da remoção foi interrompida. Recibo e journal permitem repetir com segurança.", LastErrorOr());
+        return PendingFailure(TextId::FinalRemovalInterrupted, LastErrorOr());
     NotifyShortcuts(locations, SHCNE_DELETE);
-    Result result = Success(installation.preservedFiles
-        ? L"Modo janela removido parcialmente: arquivos/atalhos/registro alterados foram preservados. Recibo e journal permitem nova tentativa ou reinstalação compatível."
-        : L"Modo janela removido. INI editado, logs e arquivos pessoais foram preservados. O recibo e o marcador permanecem para reinstalação/recuperação; o Lake original não foi alterado.");
+    Result result = Success(installation.preservedFiles ? TextId::PartialRemovalComplete : TextId::RemovalComplete);
     result.preservedConfiguration = installation.editedConfiguration;
     result.preservedFiles = installation.preservedFiles;
-    result.message += PreservedSummary(installation);
+    result.message += PreservedSummary(installation, Language::Portuguese);
+    result.messageEnglish += PreservedSummary(installation, Language::English);
     return result;
 }
 } // namespace lakefix::setup

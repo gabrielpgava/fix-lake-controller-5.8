@@ -344,9 +344,13 @@ void TestInstallAndPreservation(const std::wstring& root) {
     const Result editedRepeat = f.install();
     Check(editedRepeat.ok && editedRepeat.alreadyInstalled && editedRepeat.preservedConfiguration && changed.unchanged(f),
           "idempotent installation preserves edited INI and unknown files without a repair");
+    Check(editedRepeat.Message(Language::English) == Text(TextId::AlreadyInstalled, Language::English),
+          "successful engine result is available in English without changing installation behavior");
     const Result removed = f.uninstall();
     Report(removed);
     Check(removed.ok && removed.preservedConfiguration, "uninstall reports an edited configuration as preserved");
+    Check(removed.Message(Language::English).find(L"LakeWindowedFix.ini (edited)") != std::wstring::npos,
+          "English removal summary localizes the edited-INI role without renaming its file");
     Check(ReadBytes(f.installed(kNames[2])) == edited && ReadBytes(unknown) == "personal notes\r\n" &&
           ReadBytes(nested) == "nested personal notes\r\n", "edited INI and unfamiliar files/subdirectories survive byte-for-byte");
     Check(f.ownedGone(true) && Exists(f.locations.installDirectory), "owned resources removed; receipt/marker and nonempty user folder survive");
@@ -621,12 +625,16 @@ void TestCorruptPreflight(const std::wstring& root) {
             const Snapshot before(f);
             const Result result = f.install();
             Check(RefusedWithoutChanges(f, result, before), "install does not repair or overwrite a corrupt existing binary");
+            Check(result.Message(Language::English).find(L"Repair refused:") == 0 && result.error == ERROR_CRC,
+                  "English error text preserves the same refusal and Win32 error code");
             const Result removed = f.uninstall();
             Check(removed.ok && removed.preservedFiles && ReadBytes(f.installed(kNames[1])) == "corrupted fabricated DLL bytes" &&
                   Exists(f.installed(kManifestName)) && Exists(f.installed(kRemovalJournalName)) && !Exists(f.installed(kManagerName)) &&
                    !Exists(f.desktopLink()) && !Exists(f.programsLink()), "uninstall preserves altered binary but removes other owned resources with a recovery receipt");
             Check(removed.message.find(L"LakeWindowedFix.dll") != std::wstring::npos,
                   "partial removal names the exact known binary it preserved, without enumerating private files");
+            Check(removed.Message(Language::English).find(L"Preserved known objects: LakeWindowedFix.dll") != std::wstring::npos,
+                  "English partial-removal text preserves the exact known binary name");
         }
     }
     {
@@ -636,6 +644,8 @@ void TestCorruptPreflight(const std::wstring& root) {
             Check(result.ok && result.preservedFiles && ReadBytes(f.installed(kManagerName)) == "corrupted fabricated manager bytes" &&
                    !Exists(f.installed(kNames[0])) && !Exists(f.desktopLink()), "altered manager is preserved, never treated as a deletable owned executable");
             Check(result.message.find(kManagerName) != std::wstring::npos, "partial removal identifies a preserved manager explicitly");
+            Check(result.Message(Language::English).find(kManagerName) != std::wstring::npos,
+                  "English partial-removal text identifies the same preserved manager");
         }
     }
     {

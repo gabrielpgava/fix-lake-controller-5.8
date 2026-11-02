@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <string>
 #include "product_version.h"
+#include "setup_text.h"
 
 namespace lakefix::setup {
 struct PayloadFile {
@@ -52,6 +53,10 @@ struct Result {
     bool rolledBack = false;
     DWORD error = ERROR_SUCCESS;
     std::wstring message;
+    std::wstring messageEnglish;
+    const std::wstring& Message(Language language) const noexcept {
+        return language == Language::Portuguese ? message : messageEnglish;
+    }
 };
 
 const SupportedBuild& LakeBuild();

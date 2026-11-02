@@ -69,7 +69,7 @@ jobs:
           $options = @{ Toolchain='${{ matrix.toolchain }}'; Configuration='Release'; BuildDirectory='build-ci-runtime'; OutputDirectory='dist-ci-runtime' }
           if ($options.Toolchain -eq 'Zig') { $options.ZigPath = '.\build-tools\python\ziglang\zig.exe' }
           .\scripts\Build.ps1 @options
-      - name: Compile setup phase two and test sandbox/payload
+      - name: Compile setup phase two and test sandbox/payload/localization
         shell: powershell
         run: |
           $options = @{ Toolchain='${{ matrix.toolchain }}'; RuntimeDirectory='dist-ci-runtime'; OutputDirectory='dist-ci-setup'; BuildDirectory='build-ci-setup'; AllowUnsignedDevelopment=$true }
@@ -88,11 +88,27 @@ jobs:
         shell: powershell
         run: |
           'NOT EXECUTED: real GPU/desktop pixels, proprietary Lake OFFLINE, audio/hardware, signing and publication preflight.' | Set-Content build-ci-runtime/DESKTOP-NOT-EXECUTED.txt
+      - name: Show failed synthetic test evidence
+        if: failure()
+        shell: powershell
+        run: |
+          foreach ($directory in 'build-ci-runtime/.build-evidence','build-ci-setup/.build-evidence') {
+            if (Test-Path -LiteralPath $directory) {
+              Get-ChildItem -LiteralPath $directory -Recurse -File -Filter '*.txt' -Force | ForEach-Object {
+                if (Select-String -LiteralPath $_.FullName -Pattern '^ExitCode: [^0]' -Quiet) {
+                  Write-Host "Synthetic evidence: $($_.Name)"
+                  Get-Content -LiteralPath $_.FullName -Tail 100
+                  Select-String -LiteralPath $_.FullName -Pattern '^FAIL:|fixture infrastructure error'
+                }
+              }
+            }
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: own-evidence-${{ matrix.toolchain }}-x86
           if-no-files-found: error
+          include-hidden-files: true
           path: |
             build-ci-runtime/BUILD-PROVENANCE.json
             build-ci-runtime/.build-evidence/**

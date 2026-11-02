@@ -77,7 +77,9 @@ Regras do contrato:
    `window_state_snapshots`, `own_link_symbols`. `Get-LakeRequiredTests Runtime` e o contrato de nomes.
   Graphics/desktop real e opcional, nao um gate comum sem desktop; nao e alegado
    como executado por este manifesto. Setup exige `installer_sandbox` e
-   `installer_payload_integrity` (`--verify-payload` na imagem final, sem instalação/GUI).
+   `installer_payload_integrity` (`--verify-payload` na imagem final, sem instalação/GUI)
+   e `installer_localization` (`--verify-localization`, catálogo/CLI e janelas próprias
+   ocultas PT/EN, sem instalação nem leitura da instalação original).
 - Fontes mudando durante build/testes, submodulos, caminhos de fontes nao
   suportados e reparse points falham fechados. O fingerprint inclui nomes e
   conteudo; apenas manter a mesma flag dirty nao contorna a verificacao. Saidas
