@@ -85,11 +85,20 @@ struct FakeSurface {
     bool issued = false;
     DWORD width = 1024;
     DWORD height = 768;
+    DWORD caps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE;
+    DWORD descriptionFlags = DDSD_WIDTH | DDSD_HEIGHT | DDSD_CAPS;
+    DWORD caps2 = 0;
     HRESULT descriptionResult = S_OK;
     HRESULT presentationResult = S_FALSE;
     HRESULT fillResult = S_OK;
     HRESULT setClipperResult = S_OK;
     HRESULT getClipperResult = S_OK;
+    HRESULT restoreResult = S_OK;
+    HRESULT releaseDCResult = S_OK;
+    DWORD incomingRestoreError = 0, incomingReleaseDCError = 0;
+    HDC seenDC = nullptr;
+    bool letterboxContents = false;
+    bool dcDrewOverLetterbox = false;
     unsigned descriptions = 0;
     bool descriptionSizeCorrect = true;
     DWORD incomingDescriptionError = 0;
@@ -108,6 +117,8 @@ struct FakeSurface {
     void (*onFinalRelease)(FakeSurface*) noexcept = nullptr;
     void (*onDescription)(FakeSurface*) noexcept = nullptr;
     void (*onBlt)(FakeSurface*) noexcept = nullptr;
+    void (*onRestore)(FakeSurface*) noexcept = nullptr;
+    void (*onReleaseDC)(FakeSurface*) noexcept = nullptr;
 };
 struct FakeDraw {
     IDirectDraw7 iface{};
@@ -119,6 +130,8 @@ struct FakeDraw {
     HRESULT createResult = S_OK;
     HRESULT coopResult = S_OK;
     HRESULT evaluateResult = S_FALSE;
+    HRESULT restoreAllResult = S_OK;
+    DWORD incomingRestoreAllError = 0;
     LPDDSURFACEDESC2 seenDescription = nullptr;
     LPDIRECTDRAWSURFACE7* seenOutput = nullptr;
     IUnknown* seenOuter = nullptr;
@@ -128,6 +141,7 @@ struct FakeDraw {
     IDirectDrawSurface7* seenSurface = nullptr;
     void (*onFinalRelease)(FakeDraw*) noexcept = nullptr;
     void (*onEvaluateMode)(FakeDraw*) noexcept = nullptr;
+    void (*onRestoreAll)(FakeDraw*) noexcept = nullptr;
 };
 
 FakeDraw* realDraws[96]{};
@@ -371,9 +385,11 @@ HRESULT STDMETHODCALLTYPE Description(IDirectDrawSurface7* self, LPDDSURFACEDESC
     if (!output) return E_POINTER;
     value->descriptionSizeCorrect = value->descriptionSizeCorrect && output->dwSize == sizeof(*output);
     if (SUCCEEDED(value->descriptionResult)) {
-        output->dwFlags = DDSD_WIDTH | DDSD_HEIGHT;
+        output->dwFlags = value->descriptionFlags;
         output->dwWidth = value->width;
         output->dwHeight = value->height;
+        output->ddsCaps.dwCaps = value->caps;
+        output->ddsCaps.dwCaps2 = value->caps2;
     }
     const HRESULT result = value->descriptionResult;
     const auto callback = value->onDescription;
@@ -402,6 +418,7 @@ HRESULT STDMETHODCALLTYPE NativeBlt(IDirectDrawSurface7* self, LPRECT destinatio
     }
     ++value->blts;
     if (fill) ++value->fills;
+    if (fill && SUCCEEDED(value->fillResult)) value->letterboxContents = true;
     const auto callback = value->onBlt;
     const HRESULT result = fill ? value->fillResult : value->presentationResult;
     if (callback) callback(value);
@@ -509,6 +526,37 @@ HRESULT STDMETHODCALLTYPE SetClipper(IDirectDrawSurface7* self, LPDIRECTDRAWCLIP
     SetLastError(nativeError);
     return value->setClipperResult;
 }
+HRESULT STDMETHODCALLTYPE Restore(IDirectDrawSurface7* self) {
+    auto* value = Native(self, 27);
+    if (!value) return E_FAIL;
+    value->incomingRestoreError = GetLastError();
+    const HRESULT result = value->restoreResult;
+    if (SUCCEEDED(result)) value->letterboxContents = false;
+    if (value->onRestore) value->onRestore(value);
+    SetLastError(nativeError);
+    return result;
+}
+HRESULT STDMETHODCALLTYPE ReleaseDC(IDirectDrawSurface7* self, HDC dc) {
+    auto* value = Native(self, 26);
+    if (!value) return E_FAIL;
+    value->seenDC = dc; value->incomingReleaseDCError = GetLastError();
+    if (SUCCEEDED(value->releaseDCResult) && value->dcDrewOverLetterbox) value->letterboxContents = false;
+    const HRESULT result = value->releaseDCResult;
+    if (value->onReleaseDC) value->onReleaseDC(value);
+    SetLastError(nativeError);
+    return result;
+}
+HRESULT STDMETHODCALLTYPE RestoreAll(IDirectDraw7* self) {
+    auto* value = Native(self, 25);
+    if (!value) return E_FAIL;
+    value->incomingRestoreAllError = GetLastError();
+    const HRESULT result = value->restoreAllResult;
+    if (SUCCEEDED(result)) for (unsigned index = 0; index != surfaceCount; ++index)
+        if (realSurfaces[index]->parent == value) realSurfaces[index]->letterboxContents = false;
+    if (value->onRestoreAll) value->onRestoreAll(value);
+    SetLastError(nativeError);
+    return result;
+}
 
 IDirectDraw7Vtbl* NativeDrawTable() noexcept {
     static IDirectDraw7Vtbl table = []() {
@@ -519,11 +567,12 @@ IDirectDraw7Vtbl* NativeDrawTable() noexcept {
         STUB(GetFourCCCodes); STUB(GetGDISurface); STUB(GetMonitorFrequency); STUB(GetScanLine);
         STUB(GetVerticalBlankStatus); STUB(Initialize); STUB(RestoreDisplayMode); STUB(SetDisplayMode);
         STUB(WaitForVerticalBlank); STUB(GetAvailableVidMem); STUB(GetSurfaceFromDC);
-        STUB(RestoreAllSurfaces); STUB(TestCooperativeLevel); STUB(GetDeviceIdentifier); STUB(StartModeTest);
+        STUB(TestCooperativeLevel); STUB(GetDeviceIdentifier); STUB(StartModeTest);
 #undef STUB
         value.QueryInterface = DrawQuery; value.AddRef = DrawAddRef; value.Release = DrawRelease;
         value.CreateSurface = CreateSurface; value.DuplicateSurface = Duplicate;
         value.SetCooperativeLevel = Cooperative; value.EvaluateMode = EvaluateMode;
+        value.RestoreAllSurfaces = RestoreAll;
         return value;
     }();
     return &table;
@@ -535,7 +584,7 @@ IDirectDrawSurface7Vtbl* NativeSurfaceTable() noexcept {
         STUB(AddOverlayDirtyRect); STUB(BltBatch); STUB(EnumAttachedSurfaces); STUB(EnumOverlayZOrders);
         STUB(GetBltStatus); STUB(GetCaps); STUB(GetColorKey); STUB(GetDC); STUB(GetFlipStatus);
         STUB(GetOverlayPosition); STUB(GetPalette); STUB(GetPixelFormat); STUB(IsLost); STUB(Lock);
-        STUB(ReleaseDC); STUB(Restore); STUB(SetColorKey); STUB(SetOverlayPosition); STUB(SetPalette);
+        STUB(SetColorKey); STUB(SetOverlayPosition); STUB(SetPalette);
         STUB(Unlock); STUB(UpdateOverlayDisplay); STUB(PageLock); STUB(PageUnlock); STUB(SetSurfaceDesc);
         STUB(GetPrivateData); STUB(FreePrivateData); STUB(GetUniquenessValue); STUB(ChangeUniquenessValue);
         STUB(SetPriority); STUB(GetPriority); STUB(SetLOD);
@@ -546,6 +595,7 @@ IDirectDrawSurface7Vtbl* NativeSurfaceTable() noexcept {
         value.GetClipper = GetClipper; value.GetSurfaceDesc = Description; value.Initialize = SurfaceInitialize;
         value.SetClipper = SetClipper; value.UpdateOverlay = Overlay; value.UpdateOverlayZOrder = OverlayZ;
         value.GetDDInterface = GetDraw; value.SetPrivateData = PrivateData; value.GetLOD = GetLOD;
+        value.Restore = Restore; value.ReleaseDC = ReleaseDC;
         return value;
     }();
     return &table;
@@ -585,6 +635,7 @@ DDSURFACEDESC2 SurfaceDescription(DWORD caps = DDSCAPS_PRIMARYSURFACE) noexcept 
     value.ddsCaps.dwCaps = caps; return value;
 }
 IDirectDrawSurface7* Primary(IDirectDraw7* draw, FakeDraw& native, FakeSurface& surface) noexcept {
+    surface.caps = DDSCAPS_PRIMARYSURFACE;
     native.nextSurface = &surface;
     auto description = SurfaceDescription();
     IDirectDrawSurface7* output = nullptr;
@@ -612,18 +663,18 @@ bool Viewport(HWND, LONG, LONG, RECT*, RECT*) noexcept;
 HWND ClipWindow(HWND) noexcept;
 void Diagnostic(const wchar_t* text) noexcept {
     if (std::wcsstr(text, L"Scaled presentation active source=")) ++activeLogs;
-    if (std::wcsstr(text, L"first failure")) ++failureLogs;
-    if (std::wcsstr(text, L"bypassed: GetSurfaceDesc")) ++descriptionLogs;
+    if (std::wcsstr(text, L"Scaled presentation failure ")) ++failureLogs;
+    if (std::wcsstr(text, L"failure source GetSurfaceDesc ")) ++descriptionLogs;
     if (std::wcsstr(text, L"primary proxy allocation/capacity")) ++wrapFailureLogs;
     (void)lakefix::GetScalePresenterStats();
-    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow);
+    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow, nullptr, 1024, 768);
     SetLastError(0x6161);
 }
 bool Viewport(HWND window, LONG width, LONG height, RECT* full, RECT* fitted) noexcept {
     ++providerCalls; providerWindow = window; providerWidth = width; providerHeight = height;
     *full = fullClient; *fitted = fittedViewport;
     (void)lakefix::GetScalePresenterStats();
-    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow);
+    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow, nullptr, 1024, 768);
     if (reenterProvider && nestedPrimary && nestedSource) {
         reenterProvider = false;
         nestedResult = nestedPrimary->lpVtbl->Blt(nestedPrimary, &nestedDestination, nestedSource, nullptr, DDBLT_WAIT, nullptr);
@@ -634,7 +685,7 @@ bool Viewport(HWND window, LONG width, LONG height, RECT* full, RECT* fitted) no
 HWND ClipWindow(HWND owner) noexcept {
     clipOwnerSeen = owner;
     (void)lakefix::GetScalePresenterStats();
-    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow);
+    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow, nullptr, 1024, 768);
     SetLastError(0x7172);
     return clipHost;
 }
@@ -839,20 +890,20 @@ void TestForwarderLoggingConfiguration() {
     Check(draw->lpVtbl->EvaluateMode(draw, 41, &timeout) == E_FAIL && timeout == 58 && real.seenFlags == 41 &&
           real.incomingEvaluateError == 0x8383 && GetLastError() == nativeError && nativeReconfigurations == 3 &&
           !previousLoggerCalls && updatedLoggerCalls == 1 && failureLogs == 1 && loggerReentryObserved,
-          "forwarder first failure uses the new logger outside the registry lock and preserves native HRESULT/LastError");
+          "forwarder failure uses the new logger outside the registry lock and preserves native HRESULT/LastError");
     real.evaluateResult = E_INVALIDARG;
     SetLastError(0x8384);
     Check(draw->lpVtbl->EvaluateMode(draw, 43, &timeout) == E_INVALIDARG && timeout == 60 &&
           real.incomingEvaluateError == 0x8384 && GetLastError() == nativeError &&
-          nativeReconfigurations == 4 && !previousLoggerCalls && updatedLoggerCalls == 1,
-          "repeated forwarded failure retains the native error and one-shot logging");
+          nativeReconfigurations == 4 && !previousLoggerCalls && updatedLoggerCalls == 2,
+          "a different forwarded HRESULT has its own bounded diagnostic rather than a global one-shot");
     draw->lpVtbl->Release(draw);
     lakefix::ConfigureScalePresenter(nullptr, nullptr);
     Check(StatsAre(0, 0, 0, 0), "reentrant forwarder logging test releases all proxy allocations");
 }
 
 void TestPresentationAndClipping() {
-    ResetFixtures(); lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow);
+    ResetFixtures(); lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow, nullptr, 1024, 768);
     FakeDraw real{}; FakeSurface surface{}, source{}, auxiliary{}, peer{}; FakeClipper clipper{};
     Initialize(real); Initialize(surface); Initialize(source); Initialize(auxiliary); Initialize(peer); Initialize(clipper);
     auto* draw = Wrap(real);
@@ -885,15 +936,18 @@ void TestPresentationAndClipping() {
           IsBlackStrip(surface.bltCalls[1], RECT{1500, 200, 1700, 1100}), "real color fills remain inside host client letterbox strips");
     Check(source.descriptions == 1 && source.descriptionSizeCorrect && providerWidth == 1024 && providerHeight == 768 &&
           providerWindow == Window(0x1234) && LastCall(surface).incomingError == 0x8181 && returnedError == bltError &&
-          activeLogs == 1 && failureLogs == 1, "actual source query, client HWND and reentrant diagnostics preserve native LastError");
+          activeLogs == 1 && failureLogs >= 2, "actual source query, client HWND and reentrant diagnostics preserve native LastError");
     ClearCalls(surface);
     primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects);
     Check(surface.blts == 1 && !surface.fills && activeLogs == 1, "unchanged geometry avoids repeated fills and activation logs");
     source.width = 1920; source.height = 1080; fittedViewport = fullClient; ClearCalls(surface);
     const LONG creates = real.calls[6];
+    const unsigned previousProviders = providerCalls, previousDescriptions = source.descriptions;
     primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects);
-    Check(providerWidth == 1920 && providerHeight == 1080 && surface.blts == 1 && real.calls[6] == creates,
-          "dimensions are freshly queried without recreating any native surface");
+    Check(providerCalls == previousProviders && source.descriptions == previousDescriptions + 1 &&
+          LastCall(surface).destinationPointer == &destination && surface.blts == 1 && real.calls[6] == creates,
+          "fresh nonconfigured dimensions remain native without recreating a surface or publishing geometry");
+    source.width = 1024; source.height = 768;
     RECT crop{10, 20, 300, 400}; unsigned queries = source.descriptions, providers = providerCalls;
     ClearCalls(surface); primary->lpVtbl->Blt(primary, &destination, &source.iface, &crop, flags, &effects);
     Check(surface.blts == 1 && LastCall(surface).destinationPointer == &destination && LastCall(surface).sourceRect == &crop &&
@@ -903,7 +957,7 @@ void TestPresentationAndClipping() {
     Check(surface.blts == 1 && LastCall(surface).destinationPointer == &destination &&
           source.descriptions == queries && providerCalls == providers,
           "unconfigured presenter forwards full-source Blt without a descriptor query");
-    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow);
+    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow, nullptr, 1024, 768);
     providerEnabled = false; fittedViewport = RECT{-1000, -1000, 9000, 9000}; ClearCalls(surface);
     SetLastError(0x8282);
     Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects) == S_FALSE &&
@@ -916,29 +970,29 @@ void TestPresentationAndClipping() {
     Check(surface.blts == 1 && !surface.fills && LastCall(surface).destinationPointer == &destination,
           "out-of-host fitted rectangle is rejected before painting");
     source.descriptionResult = E_FAIL; surface.presentationResult = DDERR_SURFACELOST; ClearCalls(surface);
-    lakefix::ConfigureScalePresenter(Viewport, nullptr, ClipWindow);
+    lakefix::ConfigureScalePresenter(Viewport, nullptr, ClipWindow, nullptr, 1024, 768);
     SetLastError(0x8283);
     Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects) == DDERR_SURFACELOST &&
           surface.blts == 1 && !surface.fills && LastCall(surface).destinationPointer == &destination &&
           LastCall(surface).source == &source.iface && LastCall(surface).flags == flags && LastCall(surface).effects == &effects &&
           LastCall(surface).incomingError == 0x8283 && GetLastError() == bltError && !descriptionLogs,
           "unlogged descriptor failure preserves native Blt and does not consume its diagnostic");
-    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow); ClearCalls(surface);
+    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow, nullptr, 1024, 768); ClearCalls(surface);
     Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects) == DDERR_SURFACELOST &&
           surface.blts == 1 && LastCall(surface).destinationPointer == &destination && descriptionLogs == 1 && GetLastError() == bltError,
           "GetSurfaceDesc failure logs and preserves the real fallback failure");
     ClearCalls(surface); SetLastError(0x8284);
     Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects) == DDERR_SURFACELOST &&
           surface.blts == 1 && !surface.fills && LastCall(surface).destinationPointer == &destination &&
-          LastCall(surface).incomingError == 0x8284 && GetLastError() == bltError && descriptionLogs == 1 && failureLogs == 1,
-          "repeated descriptor failure keeps one-shot diagnostics and still calls the real failing Blt");
+          LastCall(surface).incomingError == 0x8284 && GetLastError() == bltError && descriptionLogs == 1,
+          "repeated descriptor failure remains bounded and still calls the real failing Blt");
     source.descriptionResult = S_OK; source.width = 0; ClearCalls(surface);
     // Keep the one-shot dimensions warning for the explicit replacement-logger
     // snapshot regression below; this case still checks native fail-open geometry.
-    lakefix::ConfigureScalePresenter(Viewport, nullptr, ClipWindow);
+    lakefix::ConfigureScalePresenter(Viewport, nullptr, ClipWindow, nullptr, 1024, 768);
     primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects);
     Check(surface.blts == 1 && LastCall(surface).destinationPointer == &destination, "invalid source dimensions fail open to native Blt");
-    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow);
+    lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow, nullptr, 1024, 768);
     source.width = 1024; source.height = 768; fittedViewport = fullClient; surface.presentationResult = E_INVALIDARG; ClearCalls(surface);
     Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects) == E_INVALIDARG &&
           SameRect(LastCall(surface).destination, fittedViewport), "scaled presentation returns the negative native HRESULT");
@@ -952,8 +1006,9 @@ void TestPresentationAndClipping() {
     auto* peerProxy = Primary(draw, real, peer);
     fittedViewport = fullClient; ClearCalls(surface);
     primary->lpVtbl->Blt(primary, &destination, peerProxy, nullptr, flags, &effects);
-    Check(LastCall(surface).source == &peer.iface && peer.descriptions == 1 && peer.descriptionSizeCorrect,
-          "proxy source is unwrapped before source GetSurfaceDesc and real primary Blt");
+    Check(LastCall(surface).source == &peer.iface && !peer.descriptions &&
+          LastCall(surface).destinationPointer == &destination,
+          "a known primary proxy source is unwrapped but never admitted as an offscreen frame");
     providerEnabled = false; ClearCalls(surface);
     Check(primary->lpVtbl->Blt(primary, &destination, peerProxy, nullptr, flags, &effects) == S_FALSE &&
           surface.blts == 1 && LastCall(surface).source == &peer.iface && LastCall(surface).destinationPointer == &destination,
@@ -1043,7 +1098,7 @@ void TestLetterboxFallback() {
     fullClient = {100, 200, 1700, 1100}; fittedViewport = {300, 200, 1500, 1100};
     fallbackPaintSuccess = true; fallbackPaintCalls = 0;
     realPrimary.fillResult = DDERR_EXCEPTION;
-    lakefix::ConfigureScalePresenter(FallbackViewport, nullptr, nullptr, FallbackPaint);
+    lakefix::ConfigureScalePresenter(FallbackViewport, nullptr, nullptr, FallbackPaint, 1024, 768);
     RECT original{0, 0, 1024, 768};
     Check(primary->lpVtbl->Blt(primary, &original, &source.iface, nullptr, DDBLT_WAIT, nullptr) == S_FALSE &&
           fallbackPaintCalls == 1 && realPrimary.fills == 1 && realPrimary.blts == 2 &&
@@ -1074,7 +1129,7 @@ void TestLetterboxFallback() {
           !LastCall(realPrimary).sourceRect && LastCall(realPrimary).flags == flags && LastCall(realPrimary).effects == &effects &&
           LastCall(realPrimary).incomingError == 0x9292 && GetLastError() == bltError,
           "empty strips after geometry change never mask the real presentation E_FAIL or LastError");
-    lakefix::ConfigureScalePresenter(FallbackViewport, nullptr, nullptr, nullptr);
+    lakefix::ConfigureScalePresenter(FallbackViewport, nullptr, nullptr, nullptr, 1024, 768);
     realPrimary.presentationResult = S_FALSE; ClearCalls(realPrimary); SetLastError(0x9293);
     Check(primary->lpVtbl->Blt(primary, &original, &source.iface, nullptr, flags, &effects) == S_FALSE &&
           fallbackPaintCalls == 2 && !realPrimary.fills && realPrimary.blts == 1 && source.descriptions == queries + 3 &&
@@ -1091,7 +1146,7 @@ void TestLetterboxFallback() {
           LastCall(realPrimary).incomingError == 0x9294 && GetLastError() == bltError,
           "missing painter with empty strips still returns the actual native E_FAIL and LastError");
     fullClient = letterboxClient; fittedViewport = letterboxViewport;
-    lakefix::ConfigureScalePresenter(FallbackViewport, nullptr, nullptr, FallbackPaint);
+    lakefix::ConfigureScalePresenter(FallbackViewport, nullptr, nullptr, FallbackPaint, 1024, 768);
     fallbackPaintSuccess = true; realPrimary.presentationResult = E_ACCESSDENIED; ClearCalls(realPrimary);
     Check(primary->lpVtbl->Blt(primary, &original, &source.iface, nullptr, DDBLT_WAIT, nullptr) == E_ACCESSDENIED &&
           fallbackPaintCalls == 3 && !realPrimary.fills && realPrimary.blts == 1,
@@ -1104,6 +1159,106 @@ void TestLetterboxFallback() {
     source.iface.lpVtbl->Release(&source.iface);
     lakefix::ConfigureScalePresenter(nullptr, nullptr);
     Check(StatsAre(0, 0, 0, 0), "fallback test releases every proxy/context");
+}
+
+void TestRestoredLetterbox() {
+    ResetFixtures(); lakefix::ConfigureScalePresenter(FallbackViewport, nullptr, nullptr, nullptr, 1024, 768);
+    FakeDraw real{}, other{}; FakeSurface surface{}, source{}, sibling{}, otherSurface{};
+    Initialize(real); Initialize(other); Initialize(surface); Initialize(source); Initialize(sibling); Initialize(otherSurface);
+    auto* draw = Wrap(real); auto* otherDraw = Wrap(other);
+    draw->lpVtbl->SetCooperativeLevel(draw, Window(0x1234), DDSCL_NORMAL);
+    otherDraw->lpVtbl->SetCooperativeLevel(otherDraw, Window(0x2345), DDSCL_NORMAL);
+    auto* primary = Primary(draw, real, surface); auto* otherPrimary = Primary(otherDraw, other, otherSurface);
+    auto* siblingPrimary = Primary(draw, real, sibling);
+    fullClient = {100, 200, 1700, 1100}; fittedViewport = {300, 200, 1500, 1100};
+    RECT destination{0, 0, 1024, 768};
+    const auto present = [&](IDirectDrawSurface7* output) {
+        return output->lpVtbl->Blt(output, &destination, &source.iface, nullptr, DDBLT_WAIT, nullptr);
+    };
+    present(primary); present(siblingPrimary); present(otherPrimary);
+    ClearCalls(surface); ClearCalls(sibling); ClearCalls(otherSurface);
+    SetLastError(0xb101);
+    Check(primary->lpVtbl->Restore(primary) == S_OK && surface.incomingRestoreError == 0xb101 &&
+          GetLastError() == nativeError && !surface.letterboxContents,
+          "Restore forwards native this/HRESULT/LastError and the fixture loses previous pixel contents");
+    present(primary);
+    Check(surface.fills == 2 && surface.letterboxContents,
+          "REGRESSION successful Restore repaints unchanged letterbox geometry");
+    present(siblingPrimary);
+    Check(!sibling.fills && sibling.letterboxContents, "surface Restore does not invalidate an explicitly independent sibling surface");
+    ClearCalls(surface); surface.restoreResult = DDERR_WRONGMODE;
+    Check(primary->lpVtbl->Restore(primary) == DDERR_WRONGMODE, "Restore failure preserves exact native HRESULT");
+    present(primary);
+    Check(!surface.fills, "failed Restore does not discard a valid unchanged letterbox cache");
+    ClearCalls(surface); SetLastError(0xb102);
+    Check(draw->lpVtbl->RestoreAllSurfaces(draw) == S_OK && real.incomingRestoreAllError == 0xb102 &&
+          GetLastError() == nativeError && !surface.letterboxContents && !sibling.letterboxContents && otherSurface.letterboxContents,
+          "RestoreAllSurfaces forwards exactly and loses only its owner's surface contents");
+    present(primary); present(siblingPrimary); present(otherPrimary);
+    Check(surface.fills == 2 && sibling.fills == 2 && surface.letterboxContents && sibling.letterboxContents && !otherSurface.fills,
+          "REGRESSION successful RestoreAllSurfaces invalidates only owner letterbox caches");
+    ClearCalls(surface); real.restoreAllResult = DDERR_INVALIDOBJECT;
+    Check(draw->lpVtbl->RestoreAllSurfaces(draw) == DDERR_INVALIDOBJECT, "RestoreAllSurfaces failure remains native");
+    present(primary); Check(!surface.fills, "failed RestoreAllSurfaces retains unchanged valid cache");
+    surface.dcDrewOverLetterbox = true; ClearCalls(surface);
+    auto dc = reinterpret_cast<HDC>(static_cast<UINT_PTR>(0x9876)); SetLastError(0xb103);
+    Check(primary->lpVtbl->ReleaseDC(primary, dc) == S_OK && surface.seenDC == dc &&
+          surface.incomingReleaseDCError == 0xb103 && GetLastError() == nativeError && !surface.letterboxContents,
+          "ReleaseDC forwards the exact HDC/result/LastError after synthetic DC drawing over the bars");
+    present(primary);
+    Check(surface.fills == 2 && surface.letterboxContents,
+          "REGRESSION successful ReleaseDC repaints bars changed through the primary DC");
+    ClearCalls(surface); surface.releaseDCResult = E_INVALIDARG;
+    Check(primary->lpVtbl->ReleaseDC(primary, dc) == E_INVALIDARG, "ReleaseDC failure is not hidden");
+    present(primary); Check(!surface.fills, "failed ReleaseDC keeps valid letterbox cache");
+    primary->lpVtbl->Release(primary); siblingPrimary->lpVtbl->Release(siblingPrimary); otherPrimary->lpVtbl->Release(otherPrimary);
+    draw->lpVtbl->Release(draw); otherDraw->lpVtbl->Release(otherDraw); source.iface.lpVtbl->Release(&source.iface);
+    Check(StatsAre(0, 0, 0, 0), "restore/DC cache regressions release every proxy and owner");
+}
+
+void TestFrameAdmission() {
+    ResetFixtures(); lakefix::ConfigureScalePresenter(Viewport, nullptr, nullptr, nullptr, 1024, 768);
+    FakeDraw real{}; FakeSurface surface{}, source{};
+    Initialize(real); Initialize(surface); Initialize(source);
+    auto* draw = Wrap(real); draw->lpVtbl->SetCooperativeLevel(draw, Window(0x1234), DDSCL_NORMAL);
+    auto* primary = Primary(draw, real, surface);
+    providerEnabled = true; fullClient = {100, 200, 1700, 1100}; fittedViewport = {300, 200, 1500, 1100};
+    RECT destination{0, 0, 1024, 768}, partial{0, 0, 640, 480};
+    const auto nativeOnly = [&](RECT* target, const char* message) {
+        ClearCalls(surface); const auto providers = providerCalls; SetLastError(0xb201);
+        const HRESULT result = primary->lpVtbl->Blt(primary, target, &source.iface, nullptr, DDBLT_WAIT, nullptr);
+        Check(result == S_FALSE && surface.blts == 1 && !surface.fills && providerCalls == providers &&
+              LastCall(surface).destinationPointer == target && LastCall(surface).source == &source.iface &&
+              LastCall(surface).incomingError == 0xb201 && GetLastError() == bltError, message);
+    };
+    nativeOnly(&partial, "REGRESSION partial primary destination remains native without consulting viewport");
+    nativeOnly(nullptr, "REGRESSION unknown whole-primary destination role remains native");
+    source.width = 640; source.height = 480;
+    nativeOnly(&destination, "REGRESSION auxiliary offscreen dimensions cannot be treated as a configured frame");
+    source.width = 1024; source.height = 768; source.caps = DDSCAPS_PRIMARYSURFACE;
+    nativeOnly(&destination, "REGRESSION a primary source is not an offscreen presentation frame");
+    source.caps = DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE;
+    nativeOnly(&destination, "REGRESSION a same-size texture source is forwarded without scaling");
+    source.caps = DDSCAPS_OFFSCREENPLAIN; source.descriptionFlags = DDSD_WIDTH | DDSD_HEIGHT;
+    nativeOnly(&destination, "REGRESSION missing native source role/caps is not guessed");
+    source.descriptionFlags |= DDSD_CAPS; source.caps |= DDSCAPS_MIPMAP;
+    nativeOnly(&destination, "unknown extra native source capabilities keep exact native forwarding");
+    source.caps = DDSCAPS_OFFSCREENPLAIN; source.caps2 = DDSCAPS2_TEXTUREMANAGE;
+    nativeOnly(&destination, "unknown secondary source role is not treated as an admitted plain frame");
+    source.caps2 = 0;
+    ClearCalls(surface); const auto providers = providerCalls, queries = source.descriptions;
+    RECT fullSource{0, 0, 1024, 768};
+    primary->lpVtbl->Blt(primary, &destination, &source.iface, &fullSource, DDBLT_WAIT, nullptr);
+    Check(LastCall(surface).sourceRect == &fullSource && LastCall(surface).destinationPointer == &destination &&
+          providerCalls == providers && source.descriptions == queries,
+          "even explicit full sourceRect preserves the established exact native non-null-rectangle contract");
+    ClearCalls(surface);
+    primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, DDBLT_KEYSRC | DDBLT_WAIT, nullptr);
+    Check(LastCall(surface).flags == (DDBLT_KEYSRC | DDBLT_WAIT) && LastCall(surface).destinationPointer == &destination &&
+          providerCalls == providers && source.descriptions == queries,
+          "unadmitted keyed/auxiliary Blt flags never change presentation or publish geometry");
+    primary->lpVtbl->Release(primary); draw->lpVtbl->Release(draw); source.iface.lpVtbl->Release(&source.iface);
+    Check(StatsAre(0, 0, 0, 0), "frame-admission regressions leave no proxy/owner allocations");
 }
 
 void TestSurfaceIndependentLifetime() {
@@ -1172,7 +1327,10 @@ void TestReentrancyAndReuse() {
 }
 
 void TestBounds() {
-    ResetFixtures(); lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow);
+    ResetFixtures(); lakefix::ConfigureScalePresenter(Viewport, Diagnostic, ClipWindow, nullptr, 1024, 768);
+    lakefix::ScalePresenterResources excessive{};
+    excessive.drawCapacity = excessive.primaryCapacity = ~0UL;
+    lakefix::ConfigureScalePresenterResources(excessive); // Resource injection cannot widen production hard bounds.
     FakeDraw native[65]{}; IDirectDraw7* outputs[65]{};
     bool success = true;
     for (unsigned index = 0; index != 65; ++index) {
@@ -1182,7 +1340,7 @@ void TestBounds() {
         success = (index < 64 ? wrapped && owned != &native[index].iface : !wrapped && owned == &native[index].iface) && success;
     }
     Check(success && StatsAre(64, 0, 64, 64) && native[64].references == 1,
-          "DD proxy bound fails open without changing native output or its reference");
+          "low-level DD transfer bound cannot be widened and preserves caller-owned failure output/reference");
     for (auto* output : outputs) output->lpVtbl->Release(output);
     Check(StatsAre(0, 0, 0, 0), "DD bound failure frees unused candidates");
     ResetFixtures(); FakeDraw real{}; Initialize(real); auto* draw = Wrap(real);
@@ -1196,14 +1354,14 @@ void TestBounds() {
         Initialize(nativeSurfaces[index]);
         real.nextSurface = &nativeSurfaces[index];
         const HRESULT created = draw->lpVtbl->CreateSurface(draw, &description, &surfaceOutputs[index], nullptr);
-        success = created == S_FALSE && GetLastError() == createError && success;
-        success = (index < 256 ? surfaceOutputs[index] != &nativeSurfaces[index].iface :
-                   surfaceOutputs[index] == &nativeSurfaces[index].iface) && success;
+        success = (index < 256 ? created == S_FALSE && surfaceOutputs[index] != &nativeSurfaces[index].iface :
+                   FAILED(created) && !surfaceOutputs[index]) && GetLastError() == createError && success;
     }
-    Check(success && StatsAre(1, 256, 257, 1) && wrapFailureLogs == 1 && nativeSurfaces[256].references == 1,
-          "primary bound preserves real creation success/native output and logs fail-open warning");
-    for (auto* output : surfaceOutputs) output->lpVtbl->Release(output);
+    Check(success && StatsAre(1, 256, 257, 1) && nativeSurfaces[256].references == 0 && nativeSurfaces[256].destroyed,
+          "REGRESSION primary proxy capacity failure returns failure/null and releases unpresentable native ownership");
+    for (auto* output : surfaceOutputs) if (output) output->lpVtbl->Release(output);
     draw->lpVtbl->Release(draw);
+    lakefix::ConfigureScalePresenterResources({});
     Check(StatsAre(0, 0, 0, 0), "primary capacity failure leaves no orphan allocations");
 }
 
@@ -1269,7 +1427,7 @@ void TestBltSnapshotArguments() {
               source.calls[1] == sourceAdds && source.references == 1 && destinationSurface.references == 1 &&
               StatsAre(1, 2, 3, 1), "disabled Blt snapshots neither query dimensions nor acquire hidden native references");
     }
-    lakefix::ConfigureScalePresenter(Viewport, nullptr, nullptr);
+    lakefix::ConfigureScalePresenter(Viewport, nullptr, nullptr, nullptr, 1024, 768);
     const unsigned providers = providerCalls;
     ClearCalls(destinationSurface); SetLastError(0xa105);
     Check(primary->lpVtbl->Blt(primary, &destination, sourceProxy, &crop, flags, &effects) == E_INVALIDARG &&
@@ -1330,7 +1488,7 @@ bool SnapshotPinViewport(HWND, LONG, LONG, RECT* full, RECT* fitted) noexcept {
 void TestBltSnapshotPins() {
     for (unsigned mode = 0; mode != 2; ++mode) {
         const bool same = mode != 0;
-        ResetFixtures(); lakefix::ConfigureScalePresenter(SnapshotPinViewport, nullptr, nullptr);
+        ResetFixtures(); lakefix::ConfigureScalePresenter(SnapshotPinViewport, nullptr, nullptr, nullptr, 1024, 768);
         FakeDraw real{}; FakeSurface destinationSurface{}, source{};
         Initialize(real); Initialize(destinationSurface); if (!same) Initialize(source);
         auto* draw = Wrap(real);
@@ -1357,11 +1515,11 @@ void TestBltSnapshotPins() {
               bltPinObservation.pinsAlive && bltPinObservation.nativesAlive,
               "snapshot retains destination and mapped-source metadata across reentrant final API Releases, including self-source");
         Check(result == S_FALSE && destinationSurface.blts == 1 && !destinationSurface.fills &&
-              SameRect(LastCall(destinationSurface).destination, RECT{40, 50, 840, 650}) &&
+              LastCall(destinationSurface).destinationPointer == &destination &&
               LastCall(destinationSurface).source == &nativeSource.iface && !LastCall(destinationSurface).sourceRect &&
               LastCall(destinationSurface).flags == flags && LastCall(destinationSurface).effects == &effects &&
               LastCall(destinationSurface).incomingError == incomingError && returnedError == bltError &&
-              SameRect(destination, originalDestination) && nativeSource.descriptions == 1 && nativeSource.descriptionSizeCorrect &&
+              SameRect(destination, originalDestination) && !nativeSource.descriptions &&
               destinationSurface.calls[1] == destinationAdds && nativeSource.calls[1] == sourceAdds && StatsAre(1, 0, 1, 1),
               "returning from native Blt safely drops all snapshot pins without native AddRefs or double-dropping self-source");
         const ULONG sourceRemaining = same ? 0 : source.iface.lpVtbl->Release(&source.iface);
@@ -1379,26 +1537,42 @@ constexpr RECT tupleOldViewport{120, 30, 720, 630};
 constexpr RECT tupleNewViewport{20, 90, 820, 570};
 struct SnapshotTupleObservation {
     unsigned descriptions = 0, oldProviders = 0, newProviders = 0;
+    unsigned oldAdmissions = 0, newAdmissions = 0;
     unsigned oldPainters = 0, newPainters = 0, oldLogs = 0, newLogs = 0, oldFallbackLogs = 0, newDimensionsLogs = 0;
     unsigned oldClips = 0, newClips = 0;
     bool statsCorrect = true, paintArgumentsCorrect = true;
     HWND oldWindow = nullptr, newWindow = nullptr;
     LONG oldWidth = 0, oldHeight = 0, newWidth = 0, newHeight = 0;
     DWORD oldIncomingError = 0, newIncomingError = 0;
+    DWORD oldAdmissionError = 0, newAdmissionError = 0;
 } tupleObservation;
 bool NewTupleViewport(HWND, LONG, LONG, RECT*, RECT*) noexcept;
 void NewTupleDiagnostic(const wchar_t*) noexcept;
 HWND NewTupleClip(HWND) noexcept;
 bool NewTuplePaint(HWND, const RECT*, UINT) noexcept;
+HRESULT NewTupleAdmission(HWND) noexcept;
 void ReenterNewTupleConfiguration() noexcept {
     tupleObservation.statsCorrect = StatsAre(1, 2, 3, 1) && tupleObservation.statsCorrect;
-    lakefix::ConfigureScalePresenter(NewTupleViewport, NewTupleDiagnostic, NewTupleClip, NewTuplePaint);
+    lakefix::ConfigureScalePresenter(NewTupleViewport, NewTupleDiagnostic, NewTupleClip, NewTuplePaint,
+                                     1024, 768, nullptr, NewTupleAdmission);
     SetLastError(0xa310);
 }
 void ReconfigureFromDescription(FakeSurface* source) noexcept {
     source->onDescription = nullptr;
     ++tupleObservation.descriptions;
     ReenterNewTupleConfiguration();
+}
+HRESULT OldTupleAdmission(HWND window) noexcept {
+    ++tupleObservation.oldAdmissions; tupleObservation.oldAdmissionError = GetLastError();
+    tupleObservation.statsCorrect = window == Window(0x6789) && tupleObservation.statsCorrect;
+    ReenterNewTupleConfiguration();
+    return S_FALSE;
+}
+HRESULT NewTupleAdmission(HWND window) noexcept {
+    ++tupleObservation.newAdmissions; tupleObservation.newAdmissionError = GetLastError();
+    tupleObservation.statsCorrect = window == Window(0x6789) && tupleObservation.statsCorrect;
+    ReenterNewTupleConfiguration();
+    return S_OK;
 }
 bool OldTupleViewport(HWND window, LONG width, LONG height, RECT* full, RECT* fitted) noexcept {
     ++tupleObservation.oldProviders;
@@ -1459,25 +1633,27 @@ bool NewTuplePaint(HWND window, const RECT* strips, UINT count) noexcept {
 }
 void TestBltSnapshotConfiguration() {
     ResetFixtures(); tupleObservation = {};
-    lakefix::ConfigureScalePresenter(OldTupleViewport, OldTupleDiagnostic, OldTupleClip, OldTuplePaint);
-    FakeDraw real{}; FakeSurface destinationSurface{}, source{};
-    Initialize(real); Initialize(destinationSurface); Initialize(source);
+    lakefix::ConfigureScalePresenter(OldTupleViewport, OldTupleDiagnostic, OldTupleClip, OldTuplePaint,
+                                     1024, 768, nullptr, OldTupleAdmission);
+    FakeDraw real{}; FakeSurface destinationSurface{}, source{}, spare{};
+    Initialize(real); Initialize(destinationSurface); Initialize(source); Initialize(spare);
     auto* draw = Wrap(real);
     draw->lpVtbl->SetCooperativeLevel(draw, Window(0x6789), DDSCL_NORMAL);
     auto* primary = Primary(draw, real, destinationSurface);
-    auto* sourceProxy = Primary(draw, real, source);
+    auto* sourceProxy = Primary(draw, real, spare); // Keep independent proxy/lifetime inventory; source stays truly native offscreen.
     source.onDescription = ReconfigureFromDescription;
     destinationSurface.fillResult = DDERR_EXCEPTION;
     RECT destination{7, 11, 1031, 779}; const RECT originalDestination = destination;
     DDBLTFX effects{}; effects.dwSize = sizeof(effects); effects.dwDDFX = DDBLTFX_MIRRORLEFTRIGHT;
     const DWORD flags = DDBLT_WAIT | DDBLT_DDFX;
     SetLastError(0xa301);
-    const HRESULT firstResult = primary->lpVtbl->Blt(primary, &destination, sourceProxy, nullptr, flags, &effects);
+    const HRESULT firstResult = primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects);
     const DWORD firstError = GetLastError();
     Check(tupleObservation.descriptions == 1 && tupleObservation.oldProviders == 1 && !tupleObservation.newProviders &&
+          tupleObservation.oldAdmissions == 1 && !tupleObservation.newAdmissions && tupleObservation.oldAdmissionError == 0xa301 &&
           tupleObservation.oldWindow == Window(0x6789) && tupleObservation.oldWidth == 1024 && tupleObservation.oldHeight == 768 &&
           tupleObservation.oldIncomingError == 0xa301 && source.incomingDescriptionError == 0xa301,
-          "Blt snapshots its old provider before native GetSurfaceDesc and provider callbacks reconfigure the tuple");
+          "Blt snapshots its old admission/provider before native GetSurfaceDesc and reentrant admission/provider reconfiguration");
     Check(tupleObservation.oldPainters == 1 && !tupleObservation.newPainters && tupleObservation.oldLogs >= 1 &&
           tupleObservation.oldFallbackLogs == 1 && !tupleObservation.newLogs && !tupleObservation.oldClips && !tupleObservation.newClips &&
           tupleObservation.statsCorrect && tupleObservation.paintArgumentsCorrect,
@@ -1495,28 +1671,29 @@ void TestBltSnapshotConfiguration() {
     const unsigned oldLogs = tupleObservation.oldLogs;
     source.width = 0; destinationSurface.presentationResult = E_INVALIDARG;
     ClearCalls(destinationSurface); SetLastError(0xa302);
-    const HRESULT bypassResult = primary->lpVtbl->Blt(primary, &destination, sourceProxy, nullptr, flags, &effects);
+    const HRESULT bypassResult = primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects);
     const DWORD bypassError = GetLastError();
     Check(bypassResult == E_INVALIDARG && bypassError == bltError && destinationSurface.blts == 1 && !destinationSurface.fills &&
           LastCall(destinationSurface).destinationPointer == &destination && LastCall(destinationSurface).source == &source.iface &&
           !LastCall(destinationSurface).sourceRect && LastCall(destinationSurface).flags == flags &&
           LastCall(destinationSurface).effects == &effects && LastCall(destinationSurface).incomingError == 0xa302 &&
           source.incomingDescriptionError == 0xa302 && source.descriptions == 2 && source.descriptionSizeCorrect &&
-          !tupleObservation.newProviders && !tupleObservation.newPainters,
+          !tupleObservation.newProviders && !tupleObservation.newPainters && !tupleObservation.newAdmissions,
           "next Blt freshly observes invalid dimensions and keeps exact native fallback arguments/HRESULT/LastError");
-    Check(tupleObservation.newLogs == 1 && tupleObservation.newDimensionsLogs == 1 && tupleObservation.oldLogs == oldLogs &&
+    Check(tupleObservation.newLogs >= 1 && tupleObservation.newDimensionsLogs == 1 && tupleObservation.oldLogs == oldLogs &&
           tupleObservation.descriptions == 1 && tupleObservation.statsCorrect,
           "the very next Blt uses the replacement snapshot logger, which also reenters configuration without a registry lock");
 
-    source.width = 1600; source.height = 900; destinationSurface.presentationResult = E_ACCESSDENIED;
+    source.width = 1024; source.height = 768; destinationSurface.presentationResult = E_ACCESSDENIED;
     ClearCalls(destinationSurface); SetLastError(0xa303);
-    const HRESULT replacementResult = primary->lpVtbl->Blt(primary, &destination, sourceProxy, nullptr, flags, &effects);
+    const HRESULT replacementResult = primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, flags, &effects);
     const DWORD replacementError = GetLastError();
     Check(tupleObservation.descriptions == 1 && tupleObservation.oldProviders == 1 && tupleObservation.newProviders == 1 &&
+          tupleObservation.oldAdmissions == 1 && tupleObservation.newAdmissions == 1 && tupleObservation.newAdmissionError == 0xa303 &&
           tupleObservation.oldPainters == 1 && tupleObservation.newPainters == 1 && tupleObservation.newWindow == Window(0x6789) &&
-          tupleObservation.newWidth == 1600 && tupleObservation.newHeight == 900 && tupleObservation.newIncomingError == 0xa303 &&
+          tupleObservation.newWidth == 1024 && tupleObservation.newHeight == 768 && tupleObservation.newIncomingError == 0xa303 &&
           source.incomingDescriptionError == 0xa303 && source.descriptions == 3 && source.descriptionSizeCorrect,
-          "next valid Blt samples the replacement provider/painter and freshly changed dimensions, never a cached prior snapshot");
+          "next valid Blt samples replacement admission/provider/painter with fresh dimensions, never a cached prior snapshot");
     Check(replacementResult == E_ACCESSDENIED && replacementError == bltError && destinationSurface.blts == 1 && !destinationSurface.fills &&
           SameRect(LastCall(destinationSurface).destination, tupleNewViewport) && LastCall(destinationSurface).source == &source.iface &&
           !LastCall(destinationSurface).sourceRect && LastCall(destinationSurface).flags == flags &&
@@ -1529,8 +1706,528 @@ void TestBltSnapshotConfiguration() {
           !destinationSurface.seenClipper && destinationSurface.incomingClipperError == 0xa304 && GetLastError() == nativeError &&
           tupleObservation.statsCorrect, "subsequent clipper dispatch also observes the replacement tuple outside the registry lock");
     sourceProxy->lpVtbl->Release(sourceProxy); primary->lpVtbl->Release(primary); draw->lpVtbl->Release(draw);
+    source.iface.lpVtbl->Release(&source.iface);
     lakefix::ConfigureScalePresenter(nullptr, nullptr, nullptr);
     Check(StatsAre(0, 0, 0, 0), "reentrant tuple snapshots release all proxy allocations and owner contexts");
+}
+
+struct CommitObservation {
+    unsigned queries = 0, commits = 0, replacementCommits = 0;
+    LONG publishedWidth = 0, publishedHeight = 0;
+    bool queryEnabled = true, reconfigure = false, recooperate = false, argumentsCorrect = true, nativeAlreadySucceeded = true;
+    FakeSurface* surface = nullptr;
+    IDirectDraw7* draw = nullptr;
+} commitObservation;
+void ReplacementCommit(HWND, LONG, LONG, const RECT*, const RECT*) noexcept {
+    ++commitObservation.replacementCommits;
+}
+void CommitPresented(HWND window, LONG width, LONG height, const RECT* full, const RECT* fitted) noexcept {
+    ++commitObservation.commits;
+    commitObservation.argumentsCorrect = window == Window(0x1234) && width == 1024 && height == 768 &&
+        full && fitted && SameRect(*full, fullClient) && SameRect(*fitted, fittedViewport) && commitObservation.argumentsCorrect;
+    commitObservation.nativeAlreadySucceeded = commitObservation.surface && commitObservation.surface->blts > 0 &&
+        LastCall(*commitObservation.surface).source && SUCCEEDED(commitObservation.surface->presentationResult) &&
+        GetLastError() == bltError && commitObservation.nativeAlreadySucceeded;
+    commitObservation.publishedWidth = width; commitObservation.publishedHeight = height;
+    (void)lakefix::GetScalePresenterStats(); (void)lakefix::GetScalePresenterDiagnostics();
+    lakefix::ConfigureScalePresenter(nullptr, nullptr);
+    SetLastError(0xc101);
+}
+bool QueryForCommit(HWND, LONG, LONG, RECT* full, RECT* fitted) noexcept {
+    ++commitObservation.queries; *full = fullClient; *fitted = fittedViewport;
+    if (commitObservation.reconfigure)
+        lakefix::ConfigureScalePresenter(QueryForCommit, nullptr, nullptr, nullptr, 1024, 768, ReplacementCommit);
+    if (commitObservation.recooperate)
+        commitObservation.draw->lpVtbl->SetCooperativeLevel(commitObservation.draw, Window(0x2345), DDSCL_NORMAL);
+    (void)lakefix::GetScalePresenterStats();
+    SetLastError(0xc102);
+    return commitObservation.queryEnabled;
+}
+void TestPresentationCommit() {
+    ResetFixtures(); commitObservation = {};
+    FakeDraw real{}; FakeSurface surface{}, source{}; Initialize(real); Initialize(surface); Initialize(source);
+    auto* draw = Wrap(real); draw->lpVtbl->SetCooperativeLevel(draw, Window(0x1234), DDSCL_NORMAL);
+    auto* primary = Primary(draw, real, surface); commitObservation.surface = &surface; commitObservation.draw = draw;
+    fullClient = {100, 200, 1700, 1100}; fittedViewport = {300, 200, 1500, 1100};
+    RECT destination{7, 11, 1031, 779};
+    const auto configure = [&]() {
+        lakefix::ConfigureScalePresenter(QueryForCommit, nullptr, nullptr, nullptr, 1024, 768, CommitPresented);
+    };
+    const auto present = [&]() { return primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, DDBLT_WAIT, nullptr); };
+    configure(); surface.presentationResult = DDERR_SURFACELOST;
+    Check(present() == DDERR_SURFACELOST && commitObservation.queries == 1 && !commitObservation.commits &&
+          !commitObservation.publishedWidth && !commitObservation.publishedHeight,
+          "viewport query never publishes source/input geometry before a failing image Blt");
+    surface.presentationResult = S_FALSE; surface.fillResult = E_OUTOFMEMORY; ClearCalls(surface);
+    Check(present() == E_OUTOFMEMORY && surface.blts == 1 && !commitObservation.commits,
+          "letterbox failure never commits a frame that was not presented");
+    surface.fillResult = S_OK; commitObservation.queryEnabled = false; ClearCalls(surface);
+    Check(present() == S_FALSE && surface.blts == 1 && !commitObservation.commits &&
+          LastCall(surface).destinationPointer == &destination, "declined query preserves native success without committing scaled geometry");
+    commitObservation.queryEnabled = true; commitObservation.reconfigure = true;
+    configure(); ClearCalls(surface); SetLastError(0xc103);
+    Check(present() == S_FALSE && commitObservation.commits == 1 && !commitObservation.replacementCommits &&
+          commitObservation.publishedWidth == 1024 && commitObservation.publishedHeight == 768 &&
+          commitObservation.argumentsCorrect && commitObservation.nativeAlreadySucceeded && GetLastError() == bltError &&
+          LastCall(surface).incomingError == 0xc103,
+          "successful image HRESULT commits exactly once with the original coherent callback tuple outside locks");
+    const auto providers = commitObservation.queries;
+    lakefix::ConfigureScalePresenter(QueryForCommit, nullptr); ClearCalls(surface);
+    Check(present() == S_FALSE && commitObservation.queries == providers && commitObservation.commits == 1 &&
+          surface.blts == 1 && LastCall(surface).destinationPointer == &destination,
+          "missing expected source dimensions disables admission rather than trusting query side effects");
+    configure(); commitObservation.reconfigure = false; commitObservation.recooperate = true; ClearCalls(surface);
+    Check(present() == S_FALSE && surface.blts == 1 && !surface.fills && commitObservation.commits == 1 &&
+          LastCall(surface).destinationPointer == &destination,
+          "reentrant cooperative-window changes reject a stale queried plan before fills or input-geometry commit");
+    primary->lpVtbl->Release(primary); draw->lpVtbl->Release(draw); source.iface.lpVtbl->Release(&source.iface);
+    Check(StatsAre(0, 0, 0, 0), "query/commit test releases all proxy metadata");
+}
+
+IDirectDrawSurface7* invalidationPrimary = nullptr;
+IDirectDraw7* invalidationDraw = nullptr;
+unsigned invalidationKind = 0;
+bool invalidationCallbackReentered = false;
+void InvalidateFromImage(FakeSurface* value) noexcept {
+    if (!LastCall(*value).source) return; // Invalidate AFTER letterbox fills, inside the real image Blt.
+    value->onBlt = nullptr;
+    (void)lakefix::GetScalePresenterStats();
+    lakefix::ConfigureScalePresenter(FallbackViewport, nullptr, nullptr, nullptr, 1024, 768);
+    if (invalidationKind == 0) invalidationPrimary->lpVtbl->Restore(invalidationPrimary);
+    else if (invalidationKind == 1) invalidationDraw->lpVtbl->RestoreAllSurfaces(invalidationDraw);
+    else invalidationPrimary->lpVtbl->ReleaseDC(invalidationPrimary, reinterpret_cast<HDC>(static_cast<UINT_PTR>(0x8765)));
+    invalidationCallbackReentered = true;
+}
+IDirectDrawSurface7* retireSurface = nullptr;
+IDirectDraw7* retireDraw = nullptr;
+bool invalidationPinObserved = false;
+void RetireFromRestore(FakeSurface*) noexcept {
+    retireSurface->lpVtbl->Release(retireSurface);
+    invalidationPinObserved = StatsAre(1, 0, 2, 1);
+    lakefix::ConfigureScalePresenter(nullptr, nullptr);
+}
+void RetireFromRestoreAll(FakeDraw*) noexcept {
+    retireDraw->lpVtbl->Release(retireDraw);
+    invalidationPinObserved = StatsAre(0, 1, 2, 1);
+    lakefix::ConfigureScalePresenter(nullptr, nullptr);
+}
+void TestReentrantInvalidation() {
+    for (unsigned kind = 0; kind != 3; ++kind) {
+        ResetFixtures(); commitObservation = {};
+        lakefix::ConfigureScalePresenter(QueryForCommit, nullptr, nullptr, nullptr, 1024, 768, CommitPresented);
+        FakeDraw real{}; FakeSurface surface{}, source{}; Initialize(real); Initialize(surface); Initialize(source);
+        auto* draw = Wrap(real); draw->lpVtbl->SetCooperativeLevel(draw, Window(0x1234), DDSCL_NORMAL);
+        auto* primary = Primary(draw, real, surface); surface.dcDrewOverLetterbox = true;
+        invalidationPrimary = primary; invalidationDraw = draw; invalidationKind = kind;
+        invalidationCallbackReentered = false; surface.onBlt = InvalidateFromImage;
+        fullClient = {100, 200, 1700, 1100}; fittedViewport = {300, 200, 1500, 1100};
+        RECT destination{0, 0, 1024, 768};
+        const auto present = [&]() { return primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, DDBLT_WAIT, nullptr); };
+        Check(present() == S_FALSE && invalidationCallbackReentered && !surface.letterboxContents && !commitObservation.commits,
+              "reentrant Restore/RestoreAllSurfaces/ReleaseDC cannot commit an image invalidated inside native Blt");
+        ClearCalls(surface); present();
+        Check(surface.fills == 2 && surface.letterboxContents,
+              "invalidation generation prevents outer successful Blt from reviving a stale letterbox cache");
+        void* alias = nullptr; invalidationPinObserved = false;
+        if (kind == 1) {
+            draw->lpVtbl->QueryInterface(draw, d3d7Id, &alias); retireDraw = draw; real.onRestoreAll = RetireFromRestoreAll;
+            SetLastError(0xc201);
+            Check(draw->lpVtbl->RestoreAllSurfaces(draw) == S_OK && GetLastError() == nativeError && invalidationPinObserved &&
+                  StatsAre(0, 1, 1, 1), "RestoreAllSurfaces pins a retired owner across reentrant final API Release");
+            primary->lpVtbl->Release(primary);
+        } else {
+            primary->lpVtbl->QueryInterface(primary, otherSurfaceId, &alias); retireSurface = primary;
+            if (!kind) surface.onRestore = RetireFromRestore;
+            else surface.onReleaseDC = RetireFromRestore;
+            SetLastError(0xc202);
+            const auto result = !kind ? primary->lpVtbl->Restore(primary) : primary->lpVtbl->ReleaseDC(primary, nullptr);
+            Check(result == S_OK && GetLastError() == nativeError && invalidationPinObserved && StatsAre(1, 0, 1, 1),
+                  "Restore/ReleaseDC retain metadata through native callbacks retiring the final surface API reference");
+            draw->lpVtbl->Release(draw);
+        }
+        static_cast<IUnknown*>(alias)->lpVtbl->Release(static_cast<IUnknown*>(alias));
+        source.iface.lpVtbl->Release(&source.iface);
+        Check(StatsAre(0, 0, 0, 0), "reentrant invalidation and retirement release every owner/proxy");
+    }
+}
+
+void** failureOutput = nullptr;
+bool failureCleanupReentered = false;
+void DrawFailureCleanup(FakeDraw*) noexcept {
+    failureCleanupReentered = failureOutput && !*failureOutput && StatsAre(0, 0, 0, 0);
+    (void)lakefix::GetScalePresenterDiagnostics(); lakefix::ConfigureScalePresenter(nullptr, nullptr);
+    SetLastError(0xc301);
+}
+void SurfaceFailureCleanup(FakeSurface*) noexcept {
+    failureCleanupReentered = failureOutput && !*failureOutput && StatsAre(1, 0, 1, 1);
+    (void)lakefix::GetScalePresenterDiagnostics(); lakefix::ConfigureScalePresenter(nullptr, nullptr);
+    SetLastError(0xc302);
+}
+void TestResourceFailureOwnership() {
+    for (unsigned kind = 0; kind != 3; ++kind) {
+        ResetFixtures(); lakefix::ConfigureScalePresenter(nullptr, nullptr);
+        FakeDraw real{}; Initialize(real); real.onFinalRelease = DrawFailureCleanup;
+        lakefix::ScalePresenterResources resources{};
+        if (kind < 2) resources.allocationBudget = kind; else resources.drawCapacity = 0;
+        lakefix::ConfigureScalePresenterResources(resources);
+        void* output = &real.iface; failureOutput = &output; failureCleanupReentered = false;
+        SetLastError(0xc303);
+        const auto result = lakefix::CompleteScaledDirectDrawCreation(S_FALSE, &output);
+        Check(result == (kind < 2 ? E_OUTOFMEMORY : HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_QUOTA)) && !output &&
+              real.destroyed && !real.references && real.calls[2] == 1 && failureCleanupReentered && GetLastError() == 0xc303 &&
+              StatsAre(0, 0, 0, 0), "scaled factory owner/proxy/capacity failure releases native ownership and returns clear HRESULT/null");
+    }
+    lakefix::ConfigureScalePresenterResources({}); ResetFixtures();
+    FakeDraw real{}; Initialize(real); void* output = &real.iface;
+    Check(lakefix::CompleteScaledDirectDrawCreation(S_FALSE, &output) == S_FALSE && output != &real.iface && real.references == 1,
+          "scaled factory finalizer preserves a positive native success and transfers exactly one reference");
+    auto* draw = static_cast<IDirectDraw7*>(output);
+    lakefix::ScalePresenterResources resources{}; resources.allocationBudget = 0;
+    lakefix::ConfigureScalePresenterResources(resources);
+    DrawAddRef(&real.iface); void* second = &real.iface;
+    Check(lakefix::CompleteScaledDirectDrawCreation(S_OK, &second) == S_OK && second == draw && real.references == 2,
+          "existing native reference adoption needs no allocation even when the resource budget is exhausted");
+    static_cast<IDirectDraw7*>(second)->lpVtbl->Release(static_cast<IDirectDraw7*>(second));
+    void* untouched = &real.iface;
+    Check(lakefix::CompleteScaledDirectDrawCreation(E_ACCESSDENIED, &untouched) == E_ACCESSDENIED && untouched == &real.iface &&
+          real.references == 1, "failed native factory result is untouched and is not released by the finalizer");
+    Check(lakefix::CompleteScaledDirectDrawCreation(S_OK, nullptr) == E_POINTER,
+          "scaled factory successful result with invalid output fails clearly");
+    for (unsigned kind = 0; kind != 2; ++kind) {
+        FakeSurface surface{}; Initialize(surface); surface.onFinalRelease = SurfaceFailureCleanup;
+        real.nextSurface = &surface; real.createResult = S_FALSE;
+        resources = {}; if (!kind) resources.allocationBudget = 0; else resources.primaryCapacity = 0;
+        lakefix::ConfigureScalePresenterResources(resources);
+        auto description = SurfaceDescription(); IDirectDrawSurface7* primary = nullptr;
+        failureOutput = reinterpret_cast<void**>(&primary); failureCleanupReentered = false;
+        SetLastError(0xc304);
+        const auto result = draw->lpVtbl->CreateSurface(draw, &description, &primary, nullptr);
+        Check(result == (!kind ? E_OUTOFMEMORY : HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_QUOTA)) && !primary &&
+              surface.destroyed && surface.calls[2] == 1 && failureCleanupReentered && GetLastError() == createError &&
+              StatsAre(1, 0, 1, 1), "primary proxy allocation/capacity failure clears output before reentrant native cleanup");
+    }
+    FakeSurface aliased{}, offscreen{}; Initialize(aliased); Initialize(offscreen);
+    SurfaceAddRef(&aliased.iface); real.nextSurface = &aliased;
+    auto description = SurfaceDescription(); IDirectDrawSurface7* primary = nullptr;
+    Check(FAILED(draw->lpVtbl->CreateSurface(draw, &description, &primary, nullptr)) && !primary &&
+          aliased.references == 1 && !aliased.destroyed && aliased.calls[2] == 1,
+          "failed primary wrapping releases only its newly returned reference, not an independent native alias");
+    aliased.iface.lpVtbl->Release(&aliased.iface);
+    real.nextSurface = &offscreen; description = SurfaceDescription(DDSCAPS_OFFSCREENPLAIN);
+    Check(draw->lpVtbl->CreateSurface(draw, &description, &primary, nullptr) == S_FALSE && primary == &offscreen.iface &&
+          offscreen.references == 1, "resource failure does not wrap or reject native auxiliary/offscreen creation");
+    primary->lpVtbl->Release(primary); draw->lpVtbl->Release(draw);
+    lakefix::ConfigureScalePresenterResources({}); failureOutput = nullptr;
+    Check(StatsAre(0, 0, 0, 0), "all injected production resource-admission failures leave balanced ownership");
+}
+
+struct AdmissionObservation {
+    HRESULT result = S_OK;
+    unsigned calls = 0, queries = 0, commits = 0, failureLogs = 0, recoveryLogs = 0;
+    unsigned replacementAdmissions = 0, replacementQueries = 0, replacementCommits = 0, replacementLogs = 0;
+    HWND window = nullptr;
+    DWORD incomingError = 0;
+    bool queryEnabled = true, reconfigureLog = false, retired = false, metadataAlive = true;
+    FakeSurface* surface = nullptr;
+    IDirectDrawSurface7* primary = nullptr;
+    IDirectDrawSurface7* source = nullptr;
+    HRESULT nestedResult = S_OK;
+} admissionObservation;
+HRESULT FrameAdmission(HWND) noexcept;
+bool AdmissionViewport(HWND, LONG, LONG, RECT*, RECT*) noexcept;
+void AdmissionCommit(HWND, LONG, LONG, const RECT*, const RECT*) noexcept;
+void AdmissionDiagnostic(const wchar_t*) noexcept;
+void ConfigureAdmission(lakefix::ScalePresentationAdmission admission = FrameAdmission) noexcept {
+    lakefix::ConfigureScalePresenter(AdmissionViewport, AdmissionDiagnostic, nullptr, nullptr,
+                                     1024, 768, AdmissionCommit, admission);
+}
+void ObserveAdmissionPins() noexcept {
+    (void)lakefix::GetScalePresenterStats(); (void)lakefix::GetScalePresenterDiagnostics();
+    if (admissionObservation.retired)
+        admissionObservation.metadataAlive = StatsAre(1, 0, 2, 1) && admissionObservation.metadataAlive;
+}
+HRESULT FrameAdmission(HWND window) noexcept {
+    ++admissionObservation.calls; admissionObservation.window = window;
+    admissionObservation.incomingError = GetLastError();
+    ObserveAdmissionPins();
+    SetLastError(0xd101);
+    return admissionObservation.result;
+}
+bool AdmissionViewport(HWND, LONG, LONG, RECT* full, RECT* fitted) noexcept {
+    ++admissionObservation.queries; *full = fullClient; *fitted = fittedViewport;
+    ObserveAdmissionPins(); SetLastError(0xd102);
+    return admissionObservation.queryEnabled;
+}
+void AdmissionCommit(HWND, LONG, LONG, const RECT*, const RECT*) noexcept {
+    ++admissionObservation.commits; ObserveAdmissionPins(); SetLastError(0xd103);
+}
+void AdmissionDiagnostic(const wchar_t* text) noexcept {
+    if (std::wcsstr(text, L"failure presentation admission ")) ++admissionObservation.failureLogs;
+    if (std::wcsstr(text, L"recovered presentation admission ")) ++admissionObservation.recoveryLogs;
+    ObserveAdmissionPins();
+    if (admissionObservation.reconfigureLog) ConfigureAdmission();
+    SetLastError(0xd104);
+}
+void TestPresentationAdmissionGuard() {
+    ResetFixtures(); admissionObservation = {}; admissionObservation.reconfigureLog = true; ConfigureAdmission();
+    FakeDraw real{}; FakeSurface surface{}, source{}; Initialize(real); Initialize(surface); Initialize(source);
+    auto* draw = Wrap(real); draw->lpVtbl->SetCooperativeLevel(draw, Window(0x1234), DDSCL_NORMAL);
+    auto* primary = Primary(draw, real, surface);
+    fullClient = {100, 200, 1700, 1100}; fittedViewport = {300, 200, 1500, 1100};
+    RECT destination{0, 0, 1024, 768};
+    const auto present = [&]() { return primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, DDBLT_WAIT, nullptr); };
+    SetLastError(0xd110);
+    Check(present() == S_FALSE && admissionObservation.calls == 1 && admissionObservation.queries == 1 &&
+          admissionObservation.commits == 1 && admissionObservation.window == Window(0x1234) &&
+          admissionObservation.incomingError == 0xd110 && LastCall(surface).incomingError == 0xd110 && GetLastError() == bltError,
+          "admission runs after native classification and before query, retaining the actual image HRESULT/LastError");
+    admissionObservation.result = S_FALSE; admissionObservation.queryEnabled = false; ClearCalls(surface); SetLastError(0xd111);
+    Check(present() == S_FALSE && admissionObservation.calls == 2 && admissionObservation.queries == 2 &&
+          admissionObservation.commits == 1 && surface.blts == 1 && !surface.fills &&
+          LastCall(surface).destinationPointer == &destination && LastCall(surface).incomingError == 0xd111 && GetLastError() == bltError,
+          "admission success with provider=false preserves legitimate minimized/native bypass without a commit");
+    surface.presentationResult = DDERR_SURFACELOST; ClearCalls(surface); SetLastError(0xd112);
+    Check(present() == DDERR_SURFACELOST && surface.blts == 1 && admissionObservation.calls == 3 &&
+          admissionObservation.queries == 3 && admissionObservation.commits == 1 &&
+          LastCall(surface).incomingError == 0xd112 && GetLastError() == bltError,
+          "a positive admission HRESULT never replaces an actual native-forward failure or its LastError");
+    admissionObservation.queryEnabled = true; admissionObservation.result = S_OK; surface.presentationResult = S_FALSE;
+    ClearCalls(surface); present(); // Warm unchanged geometry before a layout-prerequisite rejection.
+    const auto queries = admissionObservation.queries, commits = admissionObservation.commits;
+    const auto before = lakefix::GetScalePresenterDiagnostics();
+    admissionObservation.result = E_UNEXPECTED; admissionObservation.failureLogs = admissionObservation.recoveryLogs = 0;
+    ClearCalls(surface); SetLastError(0xd113);
+    Check(present() == E_UNEXPECTED && !surface.blts && !surface.fills && admissionObservation.queries == queries &&
+          admissionObservation.commits == commits && admissionObservation.incomingError == 0xd113 && GetLastError() == 0xd113,
+          "missing layout admission returns its exact failing HRESULT without provider, native Blt or commit and preserves caller LastError");
+    bool rejectionResults = true;
+    for (unsigned index = 1; index != 1000; ++index) {
+        SetLastError(0xd113);
+        rejectionResults = present() == E_UNEXPECTED && GetLastError() == 0xd113 && rejectionResults;
+    }
+    const auto rejected = lakefix::GetScalePresenterDiagnostics();
+    Check(rejectionResults && !surface.blts && admissionObservation.queries == queries && admissionObservation.commits == commits &&
+          admissionObservation.failureLogs == 3 && !admissionObservation.recoveryLogs && rejected.failures - before.failures == 1000,
+          "admission has its own bounded operation/HRESULT diagnostics, never native presentation during a rejection storm");
+    admissionObservation.result = S_FALSE; surface.presentationResult = E_NOTIMPL; ClearCalls(surface); SetLastError(0xd114);
+    Check(present() == E_NOTIMPL && surface.blts == 3 && surface.fills == 2 && admissionObservation.commits == commits &&
+          admissionObservation.recoveryLogs == 1 && LastCall(surface).incomingError == 0xd114 && GetLastError() == bltError,
+          "admission recovery retries invalidated letterbox geometry but still returns the real failing image HRESULT");
+    surface.presentationResult = S_FALSE; ClearCalls(surface);
+    Check(present() == S_FALSE && surface.fills == 2 && admissionObservation.commits == commits + 1 &&
+          admissionObservation.failureLogs + admissionObservation.recoveryLogs == 4,
+          "a later admitted frame succeeds without a sticky global error or unlimited recovery logs");
+
+    admissionObservation.result = E_UNEXPECTED; surface.presentationResult = E_ACCESSDENIED;
+    const auto nativeOnly = [&](RECT* target, IDirectDrawSurface7* input, RECT* crop, const char* name, DWORD flags = DDBLT_WAIT) {
+        const auto calls = admissionObservation.calls, providers = admissionObservation.queries, published = admissionObservation.commits;
+        ClearCalls(surface); SetLastError(0xd115);
+        Check(primary->lpVtbl->Blt(primary, target, input, crop, flags, nullptr) == E_ACCESSDENIED && surface.blts == 1 &&
+              !surface.fills && admissionObservation.calls == calls && admissionObservation.queries == providers &&
+              admissionObservation.commits == published && LastCall(surface).destinationPointer == target &&
+              LastCall(surface).sourceRect == crop && LastCall(surface).flags == flags &&
+              LastCall(surface).incomingError == 0xd115 && GetLastError() == bltError, name);
+    };
+    source.width = 640;
+    nativeOnly(&destination, &source.iface, nullptr, "auxiliary dimensions never invoke admission or replace native-forward failure");
+    source.width = 1024; source.caps = DDSCAPS_TEXTURE;
+    nativeOnly(&destination, &source.iface, nullptr, "unknown/texture source role bypasses admission and retains native HRESULT/LastError");
+    source.caps = DDSCAPS_OFFSCREENPLAIN; source.descriptionResult = E_FAIL;
+    nativeOnly(&destination, &source.iface, nullptr, "unclassified descriptor failure stays native without invoking admission");
+    source.descriptionResult = S_OK;
+    RECT partial{0, 0, 640, 480}, crop{1, 2, 100, 200};
+    nativeOnly(&partial, &source.iface, nullptr, "partial destination does not invoke the full-frame admission guard");
+    nativeOnly(nullptr, &source.iface, nullptr, "unknown whole-primary destination does not invoke admission");
+    nativeOnly(&destination, &source.iface, &crop, "non-null sourceRect bypasses admission without mutating native arguments");
+    nativeOnly(&destination, &source.iface, nullptr, "unsupported auxiliary Blt flags bypass admission and stay exactly native",
+               DDBLT_KEYSRC | DDBLT_WAIT);
+    nativeOnly(&destination, primary, nullptr, "known primary proxy source stays native/unwrapped without invoking admission");
+    const auto admittedCalls = admissionObservation.calls, published = admissionObservation.commits;
+    admissionObservation.result = S_OK; surface.presentationResult = S_FALSE; ClearCalls(surface);
+    Check(present() == S_FALSE && admissionObservation.calls == admittedCalls + 1 && admissionObservation.commits == published + 1 &&
+          SameRect(LastCall(surface).destination, fittedViewport),
+          "auxiliary native failures cannot poison a subsequent valid admitted presentation");
+    const auto callsWithGuard = admissionObservation.calls;
+    ConfigureAdmission(nullptr); admissionObservation.result = E_UNEXPECTED; ClearCalls(surface);
+    Check(present() == S_FALSE && admissionObservation.calls == callsWithGuard && admissionObservation.commits == published + 2,
+          "default/null admission remains compatible with standalone and low-level graphics-check presentation");
+    lakefix::ConfigureScalePresenter(nullptr, AdmissionDiagnostic, nullptr, nullptr, 1024, 768, AdmissionCommit, FrameAdmission);
+    ClearCalls(surface); SetLastError(0xd116);
+    Check(present() == E_UNEXPECTED && !surface.blts && admissionObservation.calls == callsWithGuard + 1 && GetLastError() == 0xd116,
+          "an explicit admission guard cannot be skipped merely because the viewport callback is absent");
+    primary->lpVtbl->Release(primary); draw->lpVtbl->Release(draw); source.iface.lpVtbl->Release(&source.iface);
+    lakefix::ConfigureScalePresenter(nullptr, nullptr);
+    Check(StatsAre(0, 0, 0, 0), "admission rejection, recovery and native bypass retain balanced proxy/owner lifetime");
+}
+
+HRESULT ReplacementAdmission(HWND) noexcept { ++admissionObservation.replacementAdmissions; return E_ABORT; }
+bool ReplacementAdmissionViewport(HWND, LONG, LONG, RECT*, RECT*) noexcept {
+    ++admissionObservation.replacementQueries; return false;
+}
+void ReplacementAdmissionCommit(HWND, LONG, LONG, const RECT*, const RECT*) noexcept { ++admissionObservation.replacementCommits; }
+void ReplacementAdmissionDiagnostic(const wchar_t*) noexcept { ++admissionObservation.replacementLogs; }
+HRESULT RetiringAdmission(HWND window) noexcept {
+    const auto result = FrameAdmission(window);
+    lakefix::ConfigureScalePresenter(ReplacementAdmissionViewport, ReplacementAdmissionDiagnostic, nullptr, nullptr,
+                                     1024, 768, ReplacementAdmissionCommit, ReplacementAdmission);
+    admissionObservation.primary->lpVtbl->Release(admissionObservation.primary);
+    admissionObservation.retired = true; ObserveAdmissionPins(); SetLastError(0xd120);
+    return result;
+}
+HRESULT NestedAdmission(HWND window) noexcept {
+    const auto result = FrameAdmission(window);
+    admissionObservation.surface->presentationResult = E_INVALIDARG;
+    RECT target{3, 4, 1027, 772};
+    admissionObservation.nestedResult = admissionObservation.primary->lpVtbl->Blt(admissionObservation.primary,
+        &target, admissionObservation.source, nullptr, DDBLT_WAIT, nullptr);
+    admissionObservation.surface->presentationResult = S_FALSE;
+    SetLastError(0xd121);
+    return result;
+}
+void TestPresentationAdmissionReentrancy() {
+    for (unsigned reject = 0; reject != 2; ++reject) {
+        ResetFixtures(); admissionObservation = {};
+        FakeDraw real{}; FakeSurface surface{}, source{}; Initialize(real); Initialize(surface); Initialize(source);
+        auto* draw = Wrap(real); draw->lpVtbl->SetCooperativeLevel(draw, Window(0x1234), DDSCL_NORMAL);
+        auto* primary = Primary(draw, real, surface); admissionObservation.primary = primary;
+        admissionObservation.result = reject ? HRESULT_FROM_WIN32(ERROR_NOT_READY) : S_FALSE;
+        void* alias = nullptr; primary->lpVtbl->QueryInterface(primary, otherSurfaceId, &alias);
+        const auto adds = surface.calls[1], sourceAdds = source.calls[1];
+        ConfigureAdmission(RetiringAdmission);
+        fullClient = {100, 200, 1700, 1100}; fittedViewport = {300, 200, 1500, 1100};
+        RECT destination{0, 0, 1024, 768}; SetLastError(0xd122);
+        const auto result = primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, DDBLT_WAIT, nullptr);
+        const auto error = GetLastError();
+        Check(admissionObservation.calls == 1 && admissionObservation.retired && admissionObservation.metadataAlive &&
+              surface.references == 1 && surface.calls[1] == adds && source.calls[1] == sourceAdds && StatsAre(1, 0, 1, 1),
+              "admission can retire the final API surface reference outside locks while the snapshot metadata remains pinned");
+        Check(result == (reject ? HRESULT_FROM_WIN32(ERROR_NOT_READY) : S_FALSE) && error == (reject ? 0xd122 : bltError) &&
+              admissionObservation.queries == (reject ? 0U : 1U) && admissionObservation.commits == (reject ? 0U : 1U) &&
+              surface.blts == (reject ? 0U : 3U) && !admissionObservation.replacementAdmissions &&
+              !admissionObservation.replacementQueries && !admissionObservation.replacementCommits && !admissionObservation.replacementLogs &&
+              (!reject || admissionObservation.failureLogs == 1),
+              "current Blt retains coherent admission/query/commit/logger after admission reconfigures callbacks and releases its proxy");
+        static_cast<IUnknown*>(alias)->lpVtbl->Release(static_cast<IUnknown*>(alias));
+        draw->lpVtbl->Release(draw); source.iface.lpVtbl->Release(&source.iface);
+        lakefix::ConfigureScalePresenter(nullptr, nullptr);
+        Check(StatsAre(0, 0, 0, 0), "retiring admission drops snapshot pins and independent native references exactly once");
+    }
+    ResetFixtures(); admissionObservation = {};
+    FakeDraw real{}; FakeSurface surface{}, source{}; Initialize(real); Initialize(surface); Initialize(source);
+    auto* draw = Wrap(real); draw->lpVtbl->SetCooperativeLevel(draw, Window(0x1234), DDSCL_NORMAL);
+    auto* primary = Primary(draw, real, surface);
+    admissionObservation.primary = primary; admissionObservation.source = &source.iface; admissionObservation.surface = &surface;
+    ConfigureAdmission(NestedAdmission);
+    RECT destination{0, 0, 1024, 768}; SetLastError(0xd123);
+    Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, DDBLT_WAIT, nullptr) == S_FALSE &&
+          admissionObservation.nestedResult == E_INVALIDARG && admissionObservation.calls == 1 && admissionObservation.queries == 1 &&
+          admissionObservation.commits == 1 && source.descriptions == 1 && surface.blts == 4 &&
+          LastCall(surface).incomingError == 0xd123 && GetLastError() == bltError,
+          "Blt nested inside admission forwards its real failure without recursively invoking admission or poisoning the outer success");
+    primary->lpVtbl->Release(primary); draw->lpVtbl->Release(draw); source.iface.lpVtbl->Release(&source.iface);
+    lakefix::ConfigureScalePresenter(nullptr, nullptr);
+    Check(StatsAre(0, 0, 0, 0), "nested admission leaves no proxy/owner pins behind");
+}
+
+unsigned boundedLogCalls = 0;
+bool boundedLogArguments = true, sawRepeatedCount = false, sawRecovery = false;
+void BoundedDiagnostic(const wchar_t* text) noexcept {
+    ++boundedLogCalls;
+    boundedLogArguments = text && std::wcsstr(text, L"HRESULT=0x") && std::wcsstr(text, L"failures=") &&
+        std::wcsstr(text, L"recoveries=") && boundedLogArguments;
+    if (std::wcsstr(text, L"failures=16 ")) sawRepeatedCount = true;
+    if (std::wcsstr(text, L"recovered ")) sawRecovery = true;
+    (void)lakefix::GetScalePresenterStats(); (void)lakefix::GetScalePresenterDiagnostics();
+    lakefix::ConfigureScalePresenter(nullptr, BoundedDiagnostic);
+    SetLastError(0xc401);
+}
+void TestBoundedDiagnostics() {
+    ResetFixtures(); lakefix::ConfigureScalePresenter(nullptr, BoundedDiagnostic);
+    FakeDraw real{}; FakeSurface surface{}; Initialize(real); Initialize(surface);
+    auto* draw = Wrap(real); auto* primary = Primary(draw, real, surface);
+    draw->lpVtbl->EvaluateMode(draw, 0, nullptr); primary->lpVtbl->Restore(primary); // Settle prior suite recoveries.
+    const auto before = lakefix::GetScalePresenterDiagnostics();
+    const HRESULT first = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x601);
+    const HRESULT second = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x602);
+    boundedLogCalls = 0; boundedLogArguments = true; sawRepeatedCount = sawRecovery = false;
+    real.evaluateResult = first;
+    for (unsigned index = 0; index != 1000; ++index) draw->lpVtbl->EvaluateMode(draw, 0, nullptr);
+    real.evaluateResult = S_FALSE; draw->lpVtbl->EvaluateMode(draw, 0, nullptr);
+    Check(boundedLogCalls == 4 && sawRepeatedCount && sawRecovery && boundedLogArguments,
+          "diagnostics aggregate 1000 failures plus recovery with at most four messages per operation/HRESULT");
+    for (unsigned index = 0; index != 100; ++index) {
+        real.evaluateResult = first; draw->lpVtbl->EvaluateMode(draw, 0, nullptr);
+        real.evaluateResult = S_FALSE; draw->lpVtbl->EvaluateMode(draw, 0, nullptr);
+    }
+    const auto after = lakefix::GetScalePresenterDiagnostics();
+    Check(boundedLogCalls == 4 && after.failures - before.failures == 1100 && after.recoveries - before.recoveries == 101 &&
+          after.suppressedMessages > before.suppressedMessages,
+          "oscillating failure/recovery remains counted without an unlimited recovery-log stream");
+    real.evaluateResult = second; SetLastError(0xc402);
+    const auto result = draw->lpVtbl->EvaluateMode(draw, 0, nullptr);
+    surface.restoreResult = first; const auto restore = primary->lpVtbl->Restore(primary);
+    Check(result == second && restore == first && boundedLogCalls == 6 && GetLastError() == nativeError,
+          "different HRESULT and different native operation each retain independent budgets and exact native results/LastError");
+    for (unsigned index = 0; index != 160; ++index) {
+        real.evaluateResult = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x700 + index);
+        draw->lpVtbl->EvaluateMode(draw, 0, nullptr);
+        real.evaluateResult = S_FALSE; draw->lpVtbl->EvaluateMode(draw, 0, nullptr);
+    }
+    const auto full = lakefix::GetScalePresenterDiagnostics(); const auto logs = boundedLogCalls;
+    real.evaluateResult = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x7fff);
+    for (unsigned index = 0; index != 1000; ++index) draw->lpVtbl->EvaluateMode(draw, 0, nullptr);
+    const auto overflow = lakefix::GetScalePresenterDiagnostics();
+    Check(full.trackedPairs == 96 && full.untrackedFailures > 0 && boundedLogCalls == logs &&
+          overflow.untrackedFailures - full.untrackedFailures == 1000 && boundedLogCalls <= 96 * 4 && boundedLogArguments,
+          "fixed diagnostic capacity counts excess pairs without evicting entries or producing unbounded logs");
+    primary->lpVtbl->Release(primary); draw->lpVtbl->Release(draw); lakefix::ConfigureScalePresenter(nullptr, nullptr);
+    Check(StatsAre(0, 0, 0, 0), "bounded logger can reenter stats/configuration with no locks held and leaves no proxies");
+}
+void TestOpDiag96Budget() {
+    // The preceding diagnostic suite deliberately fills the process-lifetime table; no test-only reset/bypass.
+    ResetFixtures(); admissionObservation = {}; ConfigureAdmission();
+    FakeDraw real{}; FakeSurface surface{}, source{}; Initialize(real); Initialize(surface); Initialize(source);
+    auto* draw = Wrap(real); draw->lpVtbl->SetCooperativeLevel(draw, Window(0x1234), DDSCL_NORMAL);
+    auto* primary = Primary(draw, real, surface);
+    const auto full = lakefix::GetScalePresenterDiagnostics();
+    Check(full.trackedPairs == 96, "diagnostic 96-pair budget precondition is reached through production operations");
+    const HRESULT rejected = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x6abc);
+    const HRESULT nativeFailure = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x6abd);
+    admissionObservation.result = rejected;
+    RECT destination{0, 0, 1024, 768}; SetLastError(0xd130);
+    Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, DDBLT_WAIT, nullptr) == rejected &&
+          GetLastError() == 0xd130 && !surface.blts && admissionObservation.calls == 1 &&
+          !admissionObservation.queries && !admissionObservation.commits && !admissionObservation.failureLogs,
+          "full diagnostic table never converts an untracked admission rejection into a native Blt or success");
+    source.width = 640; surface.presentationResult = nativeFailure; SetLastError(0xd131);
+    Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, DDBLT_WAIT, nullptr) == nativeFailure &&
+          GetLastError() == bltError && surface.blts == 1 && admissionObservation.calls == 1 &&
+          LastCall(surface).destinationPointer == &destination && LastCall(surface).incomingError == 0xd131,
+          "diagnostic 96-pair saturation preserves actual native-forward HRESULT/LastError for unclassified auxiliary Blt");
+    admissionObservation.result = S_FALSE; source.width = 1024; ClearCalls(surface); SetLastError(0xd132);
+    Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, DDBLT_WAIT, nullptr) == nativeFailure &&
+          GetLastError() == bltError && admissionObservation.calls == 2 && admissionObservation.queries == 1 &&
+          !admissionObservation.commits && LastCall(surface).incomingError == 0xd132,
+          "untracked image failure keeps its real HRESULT after successful admission even when diagnostics have no remaining entries");
+    surface.presentationResult = S_FALSE; ClearCalls(surface);
+    Check(primary->lpVtbl->Blt(primary, &destination, &source.iface, nullptr, DDBLT_WAIT, nullptr) == S_FALSE &&
+          admissionObservation.calls == 3 && admissionObservation.queries == 2 && admissionObservation.commits == 1,
+          "untracked auxiliary/admission/image failures do not create sticky global refusal for subsequent valid frames");
+    const auto before = lakefix::GetScalePresenterDiagnostics();
+    real.evaluateResult = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x6abe);
+    bool nativeResults = true;
+    for (unsigned index = 0; index != 1000; ++index) {
+        SetLastError(0xd133); DWORD timeout = 0;
+        nativeResults = draw->lpVtbl->EvaluateMode(draw, 7, &timeout) == real.evaluateResult && timeout == 24 &&
+            real.incomingEvaluateError == 0xd133 && GetLastError() == nativeError && nativeResults;
+    }
+    const auto after = lakefix::GetScalePresenterDiagnostics();
+    Check(nativeResults && after.trackedPairs == 96 && after.untrackedFailures - before.untrackedFailures == 1000 &&
+          after.untrackedFailures >= full.untrackedFailures + 1003 && !admissionObservation.failureLogs,
+          "diagnostic 96-pair overflow counts errors without changing native forwarded arguments/results or allocating new log budgets");
+    primary->lpVtbl->Release(primary); draw->lpVtbl->Release(draw); source.iface.lpVtbl->Release(&source.iface);
+    lakefix::ConfigureScalePresenter(nullptr, nullptr);
+    Check(StatsAre(0, 0, 0, 0), "diagnostic budget exhaustion retains balanced presenter lifetime");
 }
 } // namespace
 
@@ -1546,6 +2243,11 @@ int wmain() {
     TestPresentationAndClipping();
     TestSurfaceIndependentLifetime(); TestLetterboxFallback(); TestReentrancyAndReuse(); TestBounds(); TestConcurrentTransfers();
     TestBltSnapshotArguments(); TestBltSnapshotPins(); TestBltSnapshotConfiguration();
+    TestRestoredLetterbox();
+    TestFrameAdmission();
+    TestPresentationCommit(); TestReentrantInvalidation(); TestResourceFailureOwnership();
+    TestPresentationAdmissionGuard(); TestPresentationAdmissionReentrancy();
+    TestBoundedDiagnostics(); TestOpDiag96Budget();
     lakefix::ConfigureScalePresenter(nullptr, nullptr, nullptr);
     Check(!badNativeThis && !badNativeArguments, "every native fake received real this, original table and native interface arguments");
     Check(std::memcmp(&drawTable, NativeDrawTable(), sizeof(drawTable)) == 0 &&
