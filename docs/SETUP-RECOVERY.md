@@ -112,8 +112,8 @@ e seu backup permanecem, enquanto apenas novas criações do reparo são reverti
 Use o **setup novo fora da pasta instalada**, com o Lake fechado:
 
 ```powershell
-.\LakeWindowedFix-Setup-v0.7.0.exe --upgrade
-.\LakeWindowedFix-Setup-v0.7.0.exe --rollback
+.\LakeWindowedFix-Setup-v0.7.1.exe --upgrade
+.\LakeWindowedFix-Setup-v0.7.1.exe --rollback
 ```
 
 Os dois comandos abrem somente a confirmação em português (Atualizar/Reverter).

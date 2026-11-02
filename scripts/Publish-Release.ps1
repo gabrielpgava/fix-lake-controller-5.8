@@ -86,6 +86,8 @@ $notes = Join-Path $notesFolder 'notes.md'
 **Lake Controller software is NOT included.** This package contains only the patch; Lake Controller, Contour and other proprietary files are not redistributed. You need a legitimate original **Lake Controller 5.8 Build 007** installation and a license where required. This is an independent, unofficial project, not endorsed by the manufacturer. MIT covers only the patch's own files, not third-party software or trademarks.
 
 ## Instalar / Install
+- O atalho do patch usa um ícone próprio com faixa **PATCHED**. O atalho/ícone do Lake original permanece intacto para uso legado.
+- The patch shortcut has its own **PATCHED** badge. The original Lake shortcut/icon stays intact for legacy use.
 - Baixe **LakeWindowedFix-Setup-v$Version.exe**, feche o Lake, escolha **Portugues / English** no instalador e clique em **Instalar / Reparar**. Use o atalho **Lake Controller - Janela**. Instalacao somente no perfil do usuario; nao abre o Lake automaticamente.
 - Download **LakeWindowedFix-Setup-v$Version.exe**, close Lake, choose **Portugues / English** in setup and click **Install / Repair**. Use the **Lake Controller - Janela** shortcut. Per-user installation; setup never starts Lake automatically.
 - Se ja houver outra geracao do patch, use o setup externo com **--upgrade**. Para reverter a unica geracao anterior retida, **--rollback**. Nao remova recibos/journals manualmente para forcar a troca.

@@ -13,8 +13,14 @@ The notice is also included in `LICENSE` inside the ZIP and installer payload.
 
 ## Download and install
 
-**[Download the Windows v0.7.0 installer](https://github.com/gabrielpgava/fix-lake-controller-5.8/releases/download/v0.7.0/LakeWindowedFix-Setup-v0.7.0.exe)**
-· [Release, portable ZIP and checksums](https://github.com/gabrielpgava/fix-lake-controller-5.8/releases/tag/v0.7.0)
+**[Download the Windows v0.7.1 installer](https://github.com/gabrielpgava/fix-lake-controller-5.8/releases/download/v0.7.1/LakeWindowedFix-Setup-v0.7.1.exe)**
+· [Release, portable ZIP and checksums](https://github.com/gabrielpgava/fix-lake-controller-5.8/releases/tag/v0.7.1)
+
+### 0.7.1 — patch icon
+
+The **Lake Controller - Janela** shortcut now has its own red **PATCHED** badge.
+The original Lake shortcut and icon are left untouched, so both options can remain
+on the desktop.
 
 Requirements: Windows 10/11 and the legitimate **Lake Controller 5.8 Build 007
 x86** installation admitted by the patch's hashes. The patch is x86; it also runs
@@ -24,12 +30,15 @@ models are not automatically supported or validated.
 1. Download the installer, `SHA256SUMS.txt` and `RELEASE-MANIFEST.json`. Verify the
    checksum. This is an **experimental, unsigned** installer; follow local Windows/
    EDR policy and do not disable security protections.
-2. Close Lake. Open `LakeWindowedFix-Setup-v0.7.0.exe`, select **English** in
+2. Close Lake. Open `LakeWindowedFix-Setup-v0.7.1.exe`, select **English** in
    **Idioma / Language**, check the detected installation, then **Install / Repair**.
    **Locate Lake...** selects a different original installation folder. Unsupported
    hashes are refused, not silently adapted.
-3. Start using the **Lake Controller - Janela** shortcut. Its historical name is
-   intentionally preserved in both languages. Setup never starts Lake automatically.
+3. Start using the **Lake Controller - Janela** shortcut. Its icon has a red
+   **PATCHED** banner; the original Lake shortcut/icon is not replaced. Keep the
+   original on the desktop as a legacy fallback if the patch causes a problem.
+   The shortcut's historical name is intentionally preserved in both languages.
+   Setup never starts Lake automatically.
 4. Test in an isolated, non-operational session, without active audio or equipment
    under control. **OFFLINE inside Lake does not isolate the network.** Establish
    actual isolation separately before testing on the computer connected to a processor.
@@ -46,7 +55,7 @@ already be installed separately.
 For a different patch generation, explicitly run the **external new installer**:
 
 ```powershell
-.\LakeWindowedFix-Setup-v0.7.0.exe --upgrade --lang en
+.\LakeWindowedFix-Setup-v0.7.1.exe --upgrade --lang en
 ```
 
 - `--lang en` / `--lang pt-BR`: select English / Portuguese. The initial language
@@ -132,7 +141,7 @@ Windows x86, C++17. Use existing Zig **0.14.1**, local LLVM objcopy for own symb
 PowerShell 5.1, Git and Python 3; no automatic downloads in the build scripts.
 
 ```powershell
-.\scripts\Build.ps1 -Toolchain Zig -ZigPath C:\tools\zig\zig.exe -ObjcopyPath C:\tools\LLVM\bin\llvm-objcopy.exe -OutputDirectory dist-release-v0.7.0
+.\scripts\Build.ps1 -Toolchain Zig -ZigPath C:\tools\zig\zig.exe -ObjcopyPath C:\tools\LLVM\bin\llvm-objcopy.exe -OutputDirectory dist-release-v0.7.1
 .\scripts\Build-Installer.ps1 -ZigPath C:\tools\zig\zig.exe -ObjcopyPath C:\tools\LLVM\bin\llvm-objcopy.exe -AllowUnsignedDevelopment
 make release-check ZIG=C:/tools/zig/zig.exe OBJCOPY=C:/tools/LLVM/bin/llvm-objcopy.exe
 ```

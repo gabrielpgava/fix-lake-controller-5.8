@@ -12,6 +12,16 @@ $mock = Join-Path $sandbox 'mock-zig.ps1'
 $ErrorActionPreference = 'Stop'
 $arguments = @($args)
 if ($arguments.Count -eq 1 -and $arguments[0] -eq 'version') { Write-Output '0.14.1'; $global:LASTEXITCODE = 0; return }
+$resourceIndex = [Array]::IndexOf($arguments,'/fo')
+if ($arguments.Count -gt 1 -and $arguments[0] -eq 'rc' -and $resourceIndex -ge 0 -and $resourceIndex+1 -lt $arguments.Count) {
+    $resource = [IO.Path]::GetFullPath($arguments[$resourceIndex+1])
+    $allowed = $PSScriptRoot.TrimEnd('\')+'\'
+    if (!$resource.StartsWith($allowed,[StringComparison]::OrdinalIgnoreCase)) { throw 'Mock resource output escaped its sandbox.' }
+    [IO.File]::WriteAllText($resource,'synthetic resource compiler output; not a COFF object',[Text.Encoding]::ASCII)
+    Add-Content -LiteralPath $env:LAKE_MOCK_COMPILER_LOG -Value (@{Arguments=$arguments} | ConvertTo-Json -Compress) -Encoding UTF8
+    $global:LASTEXITCODE = 0
+    return
+}
 $index = [Array]::IndexOf($arguments,'-o')
 if ($index -lt 0 -or $index+1 -ge $arguments.Count) { throw 'Unexpected mock compiler arguments.' }
 $output = [IO.Path]::GetFullPath($arguments[$index+1])
@@ -61,13 +71,15 @@ try {
         $env:LAKE_MOCK_COMPILER_LOG = Join-Path $sandbox "$label-compiler.jsonl"
         & (Join-Path $root 'scripts\Build.ps1') -Toolchain Zig -ZigPath $mock -BuildDirectory $build -OutputDirectory $dist -EnableProfiling:$enabled -SkipTests
         $calls = @(Get-Content -LiteralPath $env:LAKE_MOCK_COMPILER_LOG | ForEach-Object { $_ | ConvertFrom-Json })
-        Check ($calls.Count -eq 2) "$label build invokes only the two mocked compiles when tests are skipped"
+        Check ($calls.Count -eq 3) "$label build invokes the runtime, icon resource and launcher compiler when tests are skipped"
         $manifest = [IO.File]::ReadAllText((Join-Path $build 'BUILD-PROVENANCE.json')) | ConvertFrom-Json
         Check (@(Get-Content -LiteralPath ($env:LAKE_MOCK_COMPILER_LOG+'.symbols') | Where-Object { $_ -ceq $manifest.BuildId }).Count -eq 2 -and
             $manifest.Tests.Results.Count -eq 0 -and $manifest.Arguments.Count -ge 9) "$label build separates both final images with the same build ID and captures actual commands without claiming tests"
         $runtime = @($calls | Where-Object { $_.Arguments -contains (Join-Path $root 'src/fix.cpp') })
         $launcher = @($calls | Where-Object { $_.Arguments -contains (Join-Path $root 'src/launcher.cpp') })
         Check ($runtime.Count -eq 1 -and $launcher.Count -eq 1 -and
+            @($calls | Where-Object { $_.Arguments[0] -eq 'rc' -and $_.Arguments -contains (Join-Path $root 'src/launcher.rc') }).Count -eq 1 -and
+            ($launcher[0].Arguments -contains (Join-Path $build 'LakeWindowedPatch.res.obj')) -and
             (($runtime[0].Arguments -contains '-DLAKE_ENABLE_PROFILING=1') -eq $enabled) -and
             (($runtime[0].Arguments -contains '-fno-emulated-tls') -eq $enabled) -and
             ($launcher[0].Arguments -notcontains '-DLAKE_ENABLE_PROFILING=1') -and

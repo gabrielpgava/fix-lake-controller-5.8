@@ -62,7 +62,7 @@ function Add-LakeSyntheticTests($Context,[string]$Folder) {
 function New-LakeProvenanceFixture([string]$Parent,[switch]$Dirty,[switch]$RuntimeOnly) {
     $folder = Join-Path $Parent ('fixture-'+[guid]::NewGuid().ToString('N'))
     foreach ($child in @('scripts','src','config','runtime','setup','build','logs')) { [IO.Directory]::CreateDirectory((Join-Path $folder $child)) | Out-Null }
-    foreach ($script in @('Build-Provenance.ps1','New-InstallerPayload.ps1','New-ReleasePackage.ps1','Test-Candidate.ps1','Publish-Release.ps1')) {
+    foreach ($script in @('Build-Provenance.ps1','New-InstallerPayload.ps1','New-ReleasePackage.ps1','New-PatchIcon.ps1','Test-Candidate.ps1','Publish-Release.ps1')) {
         [IO.File]::Copy((Join-Path $provenanceTestRoot ('scripts\'+$script)),(Join-Path $folder ('scripts\'+$script)))
     }
     [IO.File]::WriteAllText((Join-Path $folder 'src\product_version.h'),"#define LAKE_FIX_VERSION `"0.7.0`"`n#define LAKE_FIX_ABI_VERSION 2`n#define LAKE_FIX_CONFIG_SCHEMA 1`n")
@@ -70,10 +70,14 @@ function New-LakeProvenanceFixture([string]$Parent,[switch]$Dirty,[switch]$Runti
     [IO.File]::WriteAllText((Join-Path $folder 'LICENSE'),'SYNTHETIC MIT fixture; not a distributable product.')
     [IO.File]::WriteAllText((Join-Path $folder 'scripts\Measure-LakeResources.ps1'),'# synthetic support fixture')
     [IO.File]::WriteAllText((Join-Path $folder 'scripts\LakeResourceMetrics.psm1'),'# synthetic support fixture')
+    [IO.File]::WriteAllText((Join-Path $folder 'scripts\New-PatchIcon.ps1'),"# synthetic PATCHED icon generator`n")
+    [IO.File]::WriteAllText((Join-Path $folder 'src\launcher.rc'),'1 ICON "LakeWindowedPatch.ico"')
+    [IO.File]::WriteAllText((Join-Path $folder 'src\LakeWindowedPatch.ico'),'synthetic icon fixture')
     [IO.File]::WriteAllText((Join-Path $folder 'mock-compiler.ps1'),'# synthetic compiler identity; never executed')
     $global:LakeProvenanceFixture = @{
         Root=$folder;Head=('a'*40);Dirty=[bool]$Dirty
-        Inventory=@('src/product_version.h','config/LakeWindowedFix.ini','LICENSE','scripts/Measure-LakeResources.ps1','scripts/LakeResourceMetrics.psm1')
+        Inventory=@('src/product_version.h','src/launcher.rc','src/LakeWindowedPatch.ico','config/LakeWindowedFix.ini',
+            'LICENSE','scripts/Measure-LakeResources.ps1','scripts/LakeResourceMetrics.psm1','scripts/New-PatchIcon.ps1')
         Calls=[Collections.Generic.List[string]]::new()
     }
     $runtime = Join-Path $folder 'runtime'

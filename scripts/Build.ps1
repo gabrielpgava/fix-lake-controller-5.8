@@ -64,7 +64,11 @@ if ($Toolchain -eq 'Zig') {
     $runtimeLibraries = @('-luser32','-lcomctl32','-lgdi32','-lbcrypt')
     Invoke-Checked $compiler ($common + $runtimeFlags + @('-shared') + $runtimeSources +
         @((Join-Path $root 'src/fix.def')) + $runtimeLibraries + @('-o',(Join-Path $build 'LakeWindowedFix.dll')))
-    Invoke-Checked $compiler ($common + @((Join-Path $root 'src/launcher.cpp'),'-lbcrypt','-municode','-o',(Join-Path $build 'LakeWindowedLauncher.exe')))
+    $launcherIcon = Join-Path $build 'LakeWindowedPatch.res.obj'
+    Invoke-Checked $compiler @('rc','/fo',$launcherIcon,'/:output-format','coff','/:target','x86-windows-gnu',
+        (Join-Path $root 'src/launcher.rc'))
+    Invoke-Checked $compiler ($common + @((Join-Path $root 'src/launcher.cpp'),$launcherIcon,
+        '-lbcrypt','-municode','-o',(Join-Path $build 'LakeWindowedLauncher.exe')))
     if (!$SkipTests) {
         $tests = @(
             @{Binary='LakeFixScaleGeometryTest';Sources=@('tests/scale_geometry_test.cpp')},
@@ -148,6 +152,8 @@ if (!$SkipTests) {
             Invoke-LakeBuildTest -Context $context -Name $case.Name -Program powershell.exe -Arguments (@('-NoProfile','-File',
                 (Join-Path $root 'tests/Run-Fixture.ps1'),'-BinaryDirectory',$build,'-Profiling',$profilingValue) + $case.Args)
         }
+        Invoke-LakeBuildTest -Context $context -Name launcher_patch_icon -Program powershell.exe -Arguments @('-NoProfile','-File',
+            (Join-Path $root 'tests/PatchIcon.Test.ps1'),'-BinaryDirectory',$stage,'-IconPath',(Join-Path $root 'src/LakeWindowedPatch.ico'))
     } else {
         $ctest = Join-Path (Split-Path $cmake) 'ctest.exe'
         foreach ($name in @(Get-LakeRequiredTests Runtime | Where-Object { $_ -cne 'own_link_symbols' })) {

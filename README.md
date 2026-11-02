@@ -11,14 +11,20 @@
 
 O aviso também acompanha o arquivo `LICENSE` do ZIP e do payload do instalador.
 
-[Baixar instalador Windows v0.7.0](https://github.com/gabrielpgava/fix-lake-controller-5.8/releases/download/v0.7.0/LakeWindowedFix-Setup-v0.7.0.exe)
-· [Release, ZIP e checksums](https://github.com/gabrielpgava/fix-lake-controller-5.8/releases/tag/v0.7.0)
+[Baixar instalador Windows v0.7.1](https://github.com/gabrielpgava/fix-lake-controller-5.8/releases/download/v0.7.1/LakeWindowedFix-Setup-v0.7.1.exe)
+· [Release, ZIP e checksums](https://github.com/gabrielpgava/fix-lake-controller-5.8/releases/tag/v0.7.1)
 
 Shim **experimental, x86**, restrito ao **Lake Controller 5.8 Build 007** pelos
 hashes admitidos. Não altera executáveis proprietários no disco, licença,
 firmware, presets, backend de áudio nem resolução/cor global do Windows.
 
-## Candidata 0.7.0 — confiabilidade
+## 0.7.1 — ícone do patch
+
+O atalho **Lake Controller - Janela** agora tem ícone próprio com faixa vermelha
+**PATCHED**. O atalho/ícone do Lake original não é substituído, permitindo manter
+as duas opções na área de trabalho.
+
+## 0.7.0 — confiabilidade
 
 Implementa captura contínua por eixo, startup/ABI mais restritivos, restauração
 do cache de apresentação, diagnóstico limitado e recuperação de instalação.
@@ -34,14 +40,16 @@ Resultados e comandos desta candidata: [VALIDATION-07.md](docs/VALIDATION-07.md)
 
 ## Instalar, usar e remover
 
-1. Obtenha o setup do candidato revisado e confira seus checksums/manifesto. Esta
-   revisão não publica release automaticamente. Candidato de desenvolvimento é
-   **não assinado**; não desative Windows/EDR para executá-lo.
+1. Obtenha o setup v0.7.1 e confira seus checksums/manifesto. Esta release é
+   experimental e **não assinada**; não desative Windows/EDR para executá-la.
 2. Feche o Lake. No setup, confira a compatibilidade e selecione **Instalar**.
     O software original legítimo deve estar instalado; outro hash é recusado.
     Escolha **Português (Brasil)** ou **English** no campo **Idioma / Language**.
-3. Abra pelo atalho **Lake Controller - Janela**. Comece em ambiente isolado,
-   sem áudio ativo/equipamentos sob controle. O setup não inicia o Lake sozinho.
+3. Abra pelo atalho **Lake Controller - Janela**. O ícone do patch tem uma faixa
+   vermelha **PATCHED**; o atalho/ícone original do Lake não é substituído. Mantenha
+   o original na área de trabalho para abrir a versão legada se o patch der problema.
+   Comece em ambiente isolado, sem áudio ativo/equipamentos sob controle. O setup
+   não inicia o Lake sozinho.
 4. Para remover, use a entrada do patch em Aplicativos ou o setup externo.
    Configuração editada, logs e itens alheios são preservados; o recibo permite
    retomar remoção parcial/reinstalação. Não exclua a pasta recursivamente.
@@ -53,7 +61,7 @@ isolamento real precisa ser estabelecido pelo operador fora do aplicativo.
 Se já houver outra geração do patch instalada, use o setup externo:
 
 ```powershell
-.\LakeWindowedFix-Setup-v0.7.0.exe --upgrade --lang pt-BR
+.\LakeWindowedFix-Setup-v0.7.1.exe --upgrade --lang pt-BR
 ```
 
 Também são aceitos `--lang en`, `--check`, `--uninstall` e `--rollback`.
@@ -66,7 +74,7 @@ seguindo o próprio Windows. Caminhos/atalhos históricos são mantidos por comp
 Mantenha launcher/DLL/INI do mesmo build, fora de System32/SysWOW64:
 
 ```powershell
-.\dist-release-v0.7.0\LakeWindowedLauncher.exe --app-dir "C:\caminho\Lake Controller v5.8" --wait
+.\dist-release-v0.7.1\LakeWindowedLauncher.exe --app-dir "C:\caminho\Lake Controller v5.8" --wait
 ```
 
 Não injeta em instância existente. O mutex serializa launchers do usuário/sessão;
@@ -123,7 +131,7 @@ Windows x86; Zig **0.14.1** portátil e **LLVM objcopy** locais (sem download
 automático pelos builds). LLVM objcopy separa símbolos, não substitui o Zig:
 
 ```powershell
-.\scripts\Build.ps1 -Toolchain Zig -ZigPath C:\tools\zig\zig.exe -ObjcopyPath C:\tools\LLVM\bin\llvm-objcopy.exe -OutputDirectory dist-release-v0.7.0
+.\scripts\Build.ps1 -Toolchain Zig -ZigPath C:\tools\zig\zig.exe -ObjcopyPath C:\tools\LLVM\bin\llvm-objcopy.exe -OutputDirectory dist-release-v0.7.1
 .\scripts\Build-Installer.ps1 -ZigPath C:\tools\zig\zig.exe -ObjcopyPath C:\tools\LLVM\bin\llvm-objcopy.exe -AllowUnsignedDevelopment
 make release-check ZIG=C:/tools/zig/zig.exe OBJCOPY=C:/tools/LLVM/bin/llvm-objcopy.exe
 ```

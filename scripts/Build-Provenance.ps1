@@ -10,7 +10,7 @@ function Get-LakeRuntimeNames {
 function Get-LakeRequiredTests([string]$Component) {
     if ($Component -eq 'Runtime') {
         @('scale_geometry','ui_quality_policy','scaled_presenter_objects','profiling_disabled','profiling_enabled',
-            'resource_metrics_policy','isolated_build_options','windows_safe_no_rebuild',
+            'resource_metrics_policy','isolated_build_options','launcher_patch_icon','windows_safe_no_rebuild',
             'windows_experimental_resize','windows_exit_observer','windows_scaled_window',
             'startup_policy','session_configuration','component_contract','diagnostics_queue','monitor_lifecycle_policy','window_state_snapshots','own_link_symbols')
     } elseif ($Component -eq 'Setup') { @('installer_sandbox','installer_payload_integrity','installer_localization') }
@@ -19,6 +19,7 @@ function Get-LakeRequiredTests([string]$Component) {
 
 function Get-LakeReleaseNotes {
     @('PATCH ONLY. Lake Controller, Contour and other proprietary software are NOT included; a legitimate original installation and a license where required are necessary.',
+        'The patched desktop shortcut uses a red PATCHED badge; the original Lake shortcut and icon remain untouched for legacy fallback.',
         'No real Lake OFFLINE validation for this candidate; no field/hardware approval or proven FPS/leak fix.',
         'Unsigned per-user installer; review Windows/EDR prompts according to local policy.',
         'Independent unofficial project, not endorsed by the manufacturer. MIT covers only the project files, not third-party software or trademarks.')

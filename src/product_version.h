@@ -3,7 +3,7 @@
 // Product identity, independent of the proprietary compatibility profile.
 // Build scripts force-include the generated stamp before compiling every own
 // component. A manual build is explicitly untracked and cannot be packaged.
-#define LAKE_FIX_VERSION "0.7.0"
+#define LAKE_FIX_VERSION "0.7.1"
 #define LAKE_FIX_ABI_VERSION 2
 #define LAKE_FIX_CONFIG_SCHEMA 1
 #define LAKE_FIX_MAX_INI_BYTES 131072

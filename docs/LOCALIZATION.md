@@ -38,9 +38,9 @@ aviso bilingue, sem alterar o texto da concessão MIT.
 Exemplos (somente o operador os executa, com o Lake fechado):
 
 ```powershell
-.\LakeWindowedFix-Setup-v0.7.0.exe --lang en
-.\LakeWindowedFix-Setup-v0.7.0.exe --upgrade --lang pt-BR
-.\LakeWindowedFix-Setup-v0.7.0.exe --rollback --lang en
+.\LakeWindowedFix-Setup-v0.7.1.exe --lang en
+.\LakeWindowedFix-Setup-v0.7.1.exe --upgrade --lang pt-BR
+.\LakeWindowedFix-Setup-v0.7.1.exe --rollback --lang en
 ```
 
 ## Gate da imagem final

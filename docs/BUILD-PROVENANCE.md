@@ -1,4 +1,4 @@
-# Proveniencia da candidata 0.7.0
+# Proveniencia da candidata 0.7.1
 
 Esta candidata e **experimental e nao tem validacao real Lake OFFLINE**. Os
 testes sinteticos nao homologam hardware/audio/campo nem demonstram ganho de FPS
@@ -16,7 +16,7 @@ testes. **Nao existe comando para carimbar retroativamente um dist antigo.**
 . "$PSScriptRoot/Build-Provenance.ps1"
 $ctx = Start-LakeBuildProvenance -RepositoryRoot $root `
     -ManifestPath "$dist/BUILD-PROVENANCE.json" -Component Runtime `
-    -Version '0.7.0' -Toolchain Zig -ToolchainVersion '0.14.1' `
+    -Version '0.7.1' -Toolchain Zig -ToolchainVersion '0.14.1' `
     -CompilerPath $zig -Configuration Release `
     -DistributionProfile DevelopmentUnsigned `
     -BuildArguments $actualBuildArguments `
@@ -73,8 +73,9 @@ Regras do contrato:
   payload, package, candidate e publication recusam evidencia incompleta/falha.
   Nao reutilize o contexto apos completar: cada build recebe um ID novo.
 - O conjunto comum de runtime inclui as suites historicas e `startup_policy`,
-  `session_configuration`, `component_contract`, `diagnostics_queue`, `monitor_lifecycle_policy`,
-   `window_state_snapshots`, `own_link_symbols`. `Get-LakeRequiredTests Runtime` e o contrato de nomes.
+  `session_configuration`, `component_contract`, `diagnostics_queue`,
+  `monitor_lifecycle_policy`, `window_state_snapshots`, `launcher_patch_icon` e
+  `own_link_symbols`. `Get-LakeRequiredTests Runtime` e o contrato de nomes.
   Graphics/desktop real e opcional, nao um gate comum sem desktop; nao e alegado
    como executado por este manifesto. Setup exige `installer_sandbox` e
    `installer_payload_integrity` (`--verify-payload` na imagem final, sem instalação/GUI)
@@ -93,11 +94,11 @@ Regras do contrato:
 # Gera tambem installer_payload.h.manifest.json.
 $setupCtx = Start-LakeBuildProvenance -RepositoryRoot $root `
     -ManifestPath "$setupDist/BUILD-PROVENANCE.json" -Component Setup `
-    -Version '0.7.0' -Toolchain Zig -ToolchainVersion '0.14.1' `
+    -Version '0.7.1' -Toolchain Zig -ToolchainVersion '0.14.1' `
     -CompilerPath $zig -DistributionProfile DevelopmentUnsigned `
     -RuntimeManifestPath "$dist/BUILD-PROVENANCE.json" `
     -PayloadManifestPath "$build/installer_payload.h.manifest.json" `
-    -InstallerFileName 'LakeWindowedFix-Setup-v0.7.0.exe' `
+    -InstallerFileName 'LakeWindowedFix-Setup-v0.7.1.exe' `
     -GeneratedHeader "$build/generated/setup_build_id.h" `
     -BuildArguments $actualSetupArguments
 # Compilar o setup com ESSE payload e build ID; copiar EXE final para $setupDist.
@@ -125,7 +126,7 @@ do manifesto original do runtime e o manifesto/hash do payload congelado.
 ```powershell
 ./scripts/New-ReleasePackage.ps1 -RuntimeDirectory $dist `
     -InstallerDirectory $setupDist -AllowUnsignedDevelopment
-./scripts/Test-Candidate.ps1 -PackageDirectory out/releases/v0.7.0 `
+./scripts/Test-Candidate.ps1 -PackageDirectory out/releases/v0.7.1 `
     -AllowUnsignedDevelopment
 ```
 
@@ -234,7 +235,7 @@ implementacao e evidencia reais dessa cadeia.
 ./tests/Provenance.Test.ps1
 ./tests/Release-Package.Test.ps1
 # Ou reaproveitar somente como entrada de leitura um pacote real ja valido:
-./tests/Release-Package.Test.ps1 -PackageDirectory out/releases/v0.7.0
+./tests/Release-Package.Test.ps1 -PackageDirectory out/releases/v0.7.1
 ```
 
 Fixtures sinteticas ficam somente em subdiretorios GUID de `private/`, com PE

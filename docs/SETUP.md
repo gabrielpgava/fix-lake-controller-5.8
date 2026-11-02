@@ -1,4 +1,4 @@
-# Instalação nativa recuperável — candidata 0.7.0
+# Instalação nativa recuperável — candidata 0.7.1
 
 O operador não precisa de Make, compilador ou PowerShell. Use o setup externo
 revisado, confira checksums/manifesto e mantenha o Lake fechado durante operações.
@@ -12,7 +12,7 @@ Guia completo em inglês: [README.en.md](../README.en.md).
 
 ## Operação
 
-1. Abra `LakeWindowedFix-Setup-v0.7.0.exe`. O setup procura a instalação padrão;
+1. Abra `LakeWindowedFix-Setup-v0.7.1.exe`. O setup procura a instalação padrão;
    **Localizar Lake** permite selecionar outra pasta. Hash diferente é recusado.
    O campo **Idioma / Language** permite **Português (Brasil)** ou **English**.
    Também se pode usar `--lang pt-BR` ou `--lang en` com os modos do setup.

@@ -42,6 +42,10 @@ else()
 endif()
 target_link_libraries(LakeWindowedFix PRIVATE user32 comctl32 gdi32 bcrypt)
 add_executable(LakeWindowedLauncher src/launcher.cpp)
+enable_language(RC)
+target_sources(LakeWindowedLauncher PRIVATE src/launcher.rc)
+set_source_files_properties(src/launcher.rc PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/LakeWindowedPatch.ico")
 target_link_libraries(LakeWindowedLauncher PRIVATE bcrypt)
 
 function(lake_warnings target)
@@ -170,7 +174,11 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME diagnostics_queue COMMAND LakeFixDiagnosticsTest)
     add_test(NAME startup_policy COMMAND LakeFixStartupPolicyTest)
-    set_tests_properties(diagnostics_queue startup_policy PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+    add_test(NAME launcher_patch_icon COMMAND powershell.exe -NoProfile -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/PatchIcon.Test.ps1"
+        -BinaryDirectory "$<TARGET_FILE_DIR:LakeWindowedLauncher>"
+        -IconPath "${CMAKE_CURRENT_SOURCE_DIR}/src/LakeWindowedPatch.ico")
+    set_tests_properties(diagnostics_queue startup_policy launcher_patch_icon PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
     add_test(NAME resource_metrics_policy COMMAND powershell.exe -NoProfile -File
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/Resource-Metrics.Test.ps1")
     add_test(NAME isolated_build_options COMMAND powershell.exe -NoProfile -File
@@ -241,7 +249,6 @@ if(LAKE_BUILD_SETUP)
             VERBATIM)
     endif()
     if(MSVC)
-        enable_language(RC)
         set(setup_manifest src/setup.rc)
     else()
         enable_language(ASM)

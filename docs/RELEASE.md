@@ -1,4 +1,4 @@
-# Build e candidato com Make — 0.7.0
+# Build e candidato com Make — 0.7.1
 
 Comandos para desenvolvedores. O operador usa o setup, sem Make/PowerShell/compilador.
 A candidata é experimental, **não assinada e sem ensaio Lake OFFLINE desta revisão**.
@@ -15,22 +15,22 @@ A candidata é experimental, **não assinada e sem ensaio Lake OFFLINE desta rev
 ## Fluxo local (não publica)
 
 ```powershell
-make build          # runtime x86 Release e 18 suítes
+make build          # runtime x86 Release e 19 suítes
 make profile        # runtime diagnóstico separado, nunca payload de setup
 make installer      # runtime testado + setup fase dois, sandbox e payload
 make package        # lista fechada de assets e guards mock
 make release-check  # candidato permitido na branch de trabalho
 ```
 
-Saídas padrão: `dist-release-v0.7.0/`, `dist-setup-v0.7.0/`,
-`dist-profile-v0.7.0/`, `out/releases/v0.7.0/`.
+Saídas padrão: `dist-release-v0.7.1/`, `dist-setup-v0.7.1/`,
+`dist-profile-v0.7.1/`, `out/releases/v0.7.1/`.
 `VERSION` vem de `src/product_version.h`; qualquer override deve coincidir.
 `-SkipTests`, Debug e profiling não geram candidato distribuível.
 
 O pacote tem exatamente quatro assets:
 
-1. `LakeWindowedFix-Setup-v0.7.0.exe`.
-2. `LakeWindowedFix-v0.7.0-win32.zip` — exatamente seis arquivos próprios MIT.
+1. `LakeWindowedFix-Setup-v0.7.1.exe`.
+2. `LakeWindowedFix-v0.7.1-win32.zip` — exatamente seis arquivos próprios MIT.
 3. `SHA256SUMS.txt`.
 4. `RELEASE-MANIFEST.json` — schema 2, proveniência dos builds/testes/payload.
 
