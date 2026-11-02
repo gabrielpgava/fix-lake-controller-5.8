@@ -1,21 +1,26 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.6.0',
+    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
     [string]$PackageDirectory,
     [string]$GhPath = 'gh.exe',
     [switch]$DryRun,
-    [switch]$Draft
+    [switch]$Draft,
+    [switch]$AllowUnsignedDevelopment
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Build-Provenance.ps1')
 $root = Split-Path $PSScriptRoot -Parent
-$projectVersion = [regex]::Match([IO.File]::ReadAllText((Join-Path $root 'CMakeLists.txt')),
-    'project\(lake_controller_windowed_fix VERSION ([0-9]+\.[0-9]+\.[0-9]+)').Groups[1].Value
-if ($projectVersion -ne $Version) { throw 'VERSION does not match the project.' }
-if (!$PackageDirectory) { $PackageDirectory = Join-Path $root "out\releases\v$Version" }
-$package = (Resolve-Path -LiteralPath $PackageDirectory).Path
-$directory = Get-Item -LiteralPath $package
-if (!$directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Unsafe package directory.' }
+if (!$PackageDirectory) {
+    if (!$Version) { throw 'Specify -Version or -PackageDirectory.' }
+    $PackageDirectory = Join-Path $root "out\releases\v$Version"
+}
+$package = Assert-LakeSafePath (Resolve-Path -LiteralPath $PackageDirectory).Path
+$manifest = Test-LakeReleasePackage -PackageDirectory $package -Version $Version -AllowUnsignedDevelopment:$AllowUnsignedDevelopment
+if (!$Version) { $Version = $manifest.Version }
+$product = Get-LakeProvenanceProductMetadata $root
+if ($product.Version -cne $Version -or $product.AbiVersion -ne $manifest.Provenance.Runtime.AbiVersion -or
+    $product.ConfigSchema -ne $manifest.Provenance.Runtime.ConfigSchema) { throw 'Package does not match the current central product metadata.' }
 function Git-Checked([string[]]$Arguments) {
     $lines = @(& git -C $root @Arguments)
     if ($LASTEXITCODE -ne 0) { throw "Git failed: $($Arguments[0]). No force/update/delete is attempted." }
@@ -23,47 +28,10 @@ function Git-Checked([string[]]$Arguments) {
 }
 $head = (Git-Checked @('rev-parse','HEAD')) -join ''
 if (@(Git-Checked @('status','--porcelain','--untracked-files=normal')).Count) { throw 'Commit and push all source changes before releasing.' }
-$manifestPath = Join-Path $package 'RELEASE-MANIFEST.json'
-$manifestFile = Get-Item -LiteralPath $manifestPath
-if ($manifestFile.PSIsContainer -or ($manifestFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $manifestFile.Length -gt 1048576) { throw 'Unsafe release manifest.' }
-$manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-$allowedFields = @('Schema','Project','Version','SourceCommit','SourceDirty','RuntimeFiles','Assets','Experimental','Notes')
-$fields = @($manifest.PSObject.Properties.Name)
-if ($fields.Count -ne $allowedFields.Count -or @($fields | Where-Object { $_ -notin $allowedFields }).Count) { throw 'Unexpected manifest metadata; publication refused to avoid leaking private fields.' }
-$allowedNotes = @('MIT project files only; no proprietary Lake binaries or private evidence.',
-    'Runtime tested OFFLINE only; no field/hardware approval or proven FPS/leak fix.',
-    'Unsigned per-user installer; review Windows/EDR prompts according to local policy.')
-if ((@($manifest.Notes) -join "`n") -cne ($allowedNotes -join "`n")) { throw 'Unexpected release notes metadata; use the generated manifest.' }
-if ($manifest.Schema -ne 1 -or $manifest.Project -ne 'lake-controller-windowed-fix' -or $manifest.Version -ne $Version -or
-    $manifest.SourceDirty -or $manifest.SourceCommit -ne $head -or $manifest.Experimental -ne $true) { throw 'Package must come from this exact clean source commit; run make package again.' }
+if ($head -cnotmatch '^[a-f0-9]{40}$' -or $manifest.SourceDirty -or $manifest.SourceCommit -cne $head) {
+    throw 'Publication requires this exact clean source commit. Candidate validation is separate.'
+}
 $expected = @("LakeWindowedFix-v$Version-win32.zip","LakeWindowedFix-Setup-v$Version.exe",'SHA256SUMS.txt')
-$seen = @()
-foreach ($asset in $manifest.Assets) {
-    $assetFields = @($asset.PSObject.Properties.Name)
-    if ($assetFields.Count -ne 3 -or @($assetFields | Where-Object { $_ -notin @('Name','Sha256','Bytes') }).Count) { throw 'Unexpected asset metadata.' }
-    if ($asset.Name -notin $expected -or $asset.Name -in $seen -or $asset.Sha256 -notmatch '^[a-f0-9]{64}$') { throw 'Unsafe asset manifest.' }
-    $seen += $asset.Name
-    $path = Join-Path $package $asset.Name
-    $file = Get-Item -LiteralPath $path
-    if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-        (Get-FileHash -LiteralPath $path).Hash -ine $asset.Sha256 -or $file.Length -ne $asset.Bytes) { throw "Asset validation failed: $($asset.Name)" }
-}
-if ($seen.Count -ne 3) { throw 'Exactly three checksummed assets are required.' }
-$checksumLines = foreach ($name in $expected[0..1]) {
-    $record = @($manifest.Assets | Where-Object { $_.Name -eq $name })[0]
-    "$($record.Sha256)  $name"
-}
-$expectedChecksums = ($checksumLines -join "`r`n") + "`r`n"
-if ([IO.File]::ReadAllText((Join-Path $package 'SHA256SUMS.txt')) -cne $expectedChecksums) { throw 'Checksum contents do not match the two binary assets.' }
-$runtimeNames = @('LakeWindowedLauncher.exe','LakeWindowedFix.dll','LakeWindowedFix.ini','LICENSE','Measure-LakeResources.ps1','LakeResourceMetrics.psm1')
-if (@($manifest.RuntimeFiles).Count -ne 6 -or (@($manifest.RuntimeFiles) -join '|') -cne ($runtimeNames -join '|')) { throw 'Unexpected runtime file metadata.' }
-Add-Type -AssemblyName System.IO.Compression
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-$zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $package "LakeWindowedFix-v$Version-win32.zip"))
-try {
-    $names = @($zip.Entries | ForEach-Object { $_.FullName })
-    if ($names.Count -ne 6 -or @($names | Sort-Object -Unique).Count -ne 6 -or @($names | Where-Object { $_ -notin $runtimeNames }).Count) { throw 'ZIP contains unexpected files; publication refused.' }
-} finally { $zip.Dispose() }
 function Get-GitHubRepository([string]$Url) {
     if ($Url -match '^git@github\.com:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?$') { return $Matches[1] }
     if ($Url -match '^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$') { return $Matches[1] }
@@ -117,7 +85,7 @@ Baixe **LakeWindowedFix-Setup-v$Version.exe**, abra com duplo clique, clique em 
 Requer Lake Controller 5.8 Build 007 original instalado. Sem comandos ou edicao manual de INI; instalacao apenas no perfil do usuario.
 
 ## Limites
-**Experimental, validacao limitada em OFFLINE. Nao homologado para uso em campo/audio de producao.** Nao ha ganho sustentado de FPS nem correcao de vazamento comprovados. Instalador nao assinado; siga a politica local de seguranca.
+**Candidata experimental; sem validacao real Lake OFFLINE desta candidata. Nao homologado para uso em campo/audio de producao.** Nao ha ganho sustentado de FPS nem correcao de vazamento comprovados. Instalador nao assinado; siga a politica local de seguranca.
 
 Os arquivos incluem somente o projeto MIT; nenhum binario proprietario, log, preset ou evidencia privada. O ZIP e a alternativa portatil para usuarios avancados. Confira **SHA256SUMS.txt** e **RELEASE-MANIFEST.json**.
 

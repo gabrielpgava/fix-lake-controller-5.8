@@ -11,6 +11,11 @@
 #include "ddraw_scale.h"
 #include "ui_quality.h"
 #include "profile.h"
+#include "session_config.h"
+#include "lake_build_profile.h"
+#include "component_contract.h"
+#include "session_diagnostics.h"
+#include "layout_policy.h"
 #ifdef _MSC_VER
 #include <intrin.h>
 #define LAKE_CALLER_ADDRESS() _ReturnAddress()
@@ -32,6 +37,7 @@ HWND client;
 SIZE originalClientSize;
 UINT readyMessage;
 UINT clientGoneMessage;
+UINT startupFailedMessage;
 bool sizing;
 bool pendingSize;
 bool inResize;
@@ -44,8 +50,11 @@ SIZE initialViewSize{1024, 576};
 SIZE minimumViewSize{lakefix::kScaledMinWidth, lakefix::kScaledMinHeight};
 bool canvasLayoutSeeded;
 bool closeAfterStartup;
+DWORD fatalStartupCode;
+bool fatalStartupNotified;
 bool smoothFontsEnabled = true;
 bool systemCursorEnabled = true;
+lakefix::SessionConfig sessionConfig;
 HCURSOR systemArrow;
 bool smoothFontLogged;
 bool systemCursorLogged;
@@ -54,12 +63,29 @@ WPARAM pendingType;
 LPARAM pendingDimensions;
 LONG initialization;
 SRWLOCK importsLock = SRWLOCK_INIT;
-SRWLOCK logLock = SRWLOCK_INIT;
 HANDLE logFile = INVALID_HANDLE_VALUE;
 LONG observingException;
 ULONG_PTR applicationBytes;
-HMODULE renderer;
-ULONG_PTR rendererBytes;
+// One coherent x86 (base,size) publication. Once admitted, Contour is pinned;
+// its base cannot be reused and no unsynchronized pair of globals is read.
+alignas(8) std::atomic<std::uint64_t> rendererImage{0};
+struct RendererImage { HMODULE module; ULONG_PTR bytes; };
+RendererImage VerifiedRenderer() noexcept {
+    const auto packed = rendererImage.load(std::memory_order_acquire);
+    return {reinterpret_cast<HMODULE>(static_cast<ULONG_PTR>(static_cast<DWORD>(packed))),
+            static_cast<ULONG_PTR>(packed >> 32)};
+}
+HANDLE admittedContour = INVALID_HANDLE_VALUE; // Retained to process exit; never hot-unhook/unload.
+BY_HANDLE_FILE_INFORMATION admittedContourIdentity{};
+wchar_t admittedContourPath[32768]{};
+std::atomic<DWORD> startupStages{0};
+std::atomic<DWORD> startupFailure{0};
+std::atomic<bool> configurationLoaded{false};
+std::atomic<unsigned long> cursorPairCount{0}, cursorTruncatedDeltaCount{0}, cursorZeroDeltaCount{0};
+std::atomic<bool> layoutAdmissionFailureLogged{false};
+enum StartupStage : DWORD { CompatibleDll = 1, HooksInstalled = 2, HostCanvasPrepared = 4,
+    LayoutAdmitted = 8, GraphicsProxyAvailable = 16, FirstPresentation = 32,
+    ResponsivenessObserved = 64, ShutdownObserved = 128 };
 std::atomic<DWORD> uiThreadId{0};
 std::atomic<bool> nativeUiQuitPending{false};
 std::atomic<int> nativeUiQuitCode{0};
@@ -76,7 +102,9 @@ bool OpenLogIn(const wchar_t* directory) {
     if (swprintf_s(file, L"%ls\\LakeWindowedFix-%lu.log", directory, GetCurrentProcessId()) < 0)
         return false;
     if (!CreateDirectoryW(directory, nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return false;
-    logFile = CreateFileW(file, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    // One writer is required by the bounded consumer. Readers may review logs;
+    // a second writer cannot invalidate its byte accounting during the session.
+    logFile = CreateFileW(file, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_DELETE,
                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     return logFile != INVALID_HANDLE_VALUE;
 }
@@ -98,28 +126,8 @@ void InitializeLog() {
 
 void Log(const wchar_t* text, bool nonBlocking = false) {
     [[maybe_unused]] lakefix::profile::Scope timing(lakefix::profile::Metric::LogTotal);
-    const DWORD error = GetLastError();
-    wchar_t line[768]{};
-    swprintf_s(line, L"[LakeWindowedFix 0.6] tick=%llu pid=%lu tid=%lu %ls\r\n",
-               GetTickCount64(), GetCurrentProcessId(), GetCurrentThreadId(), text);
-    // Exit/exception observers must not wait for a debugger notification.
-    if (!nonBlocking) OutputDebugStringW(line);
-    if (logFile != INVALID_HANDLE_VALUE) {
-        char encoded[3072]{};
-        const int length = WideCharToMultiByte(CP_UTF8, 0, line, -1, encoded, sizeof(encoded), nullptr, nullptr);
-        if (length > 1) {
-            const bool acquired = lakefix::AcquireDiagnosticLock(logLock, nonBlocking);
-            if (acquired) {
-                DWORD written{};
-                {
-                    [[maybe_unused]] lakefix::profile::Scope writeTiming(lakefix::profile::Metric::LogWrite);
-                    WriteFile(logFile, encoded, static_cast<DWORD>(length - 1), &written, nullptr);
-                }
-                ReleaseSRWLockExclusive(&logLock);
-            }
-        }
-    }
-    SetLastError(error);
+    (void)nonBlocking; // All admission is now bounded, best-effort, nonblocking.
+    lakefix::diagnostics::Write(text);
 }
 
 ULONG_PTR ImageBytes(HMODULE module) {
@@ -134,13 +142,14 @@ void LogSite(const wchar_t* event, DWORD code, const void* address, bool nonBloc
     const DWORD error = GetLastError();
     const ULONG_PTR value = reinterpret_cast<ULONG_PTR>(address);
     const ULONG_PTR appBase = reinterpret_cast<ULONG_PTR>(application);
-    const ULONG_PTR rendererBase = reinterpret_cast<ULONG_PTR>(renderer);
+    const auto renderer = VerifiedRenderer();
+    const ULONG_PTR rendererBase = reinterpret_cast<ULONG_PTR>(renderer.module);
     const wchar_t* name = L"outside-cached-target-images";
     ULONG_PTR rva = 0;
     if (application && value >= appBase && value - appBase < applicationBytes) {
         name = L"main-executable";
         rva = value - appBase;
-    } else if (renderer && value >= rendererBase && value - rendererBase < rendererBytes) {
+    } else if (renderer.module && value >= rendererBase && value - rendererBase < renderer.bytes) {
         name = L"Contour.dll";
         rva = value - rendererBase;
     }
@@ -159,46 +168,81 @@ LONG CALLBACK ObserveException(EXCEPTION_POINTERS* info) {
     if ((code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_ILLEGAL_INSTRUCTION ||
          code == EXCEPTION_INT_DIVIDE_BY_ZERO) &&
         InterlockedCompareExchange(&observingException, 1, 0) == 0) {
-        LogSite(L"First-chance exception (may be handled by application)", code,
-                info->ExceptionRecord->ExceptionAddress, true);
+        lakefix::diagnostics::RecordException(code, info->ExceptionRecord->ExceptionAddress);
         InterlockedExchange(&observingException, 0);
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-void LoadResizePolicy() {
+bool LoadResizePolicy() {
     wchar_t ini[1024]{};
     const DWORD length = GetModuleFileNameW(self, ini, ARRAYSIZE(ini));
-    if (length && length < ARRAYSIZE(ini)) {
-        wchar_t* slash = wcsrchr(ini, L'\\');
-        if (slash && wcscpy_s(slash + 1, ARRAYSIZE(ini) - (slash + 1 - ini), L"LakeWindowedFix.ini") == 0) {
-            nativeResizeEnabled = GetPrivateProfileIntW(L"compatibility", L"NativeResize", 0, ini) == 1;
-            scaleRenderingEnabled = !nativeResizeEnabled &&
-                GetPrivateProfileIntW(L"compatibility", L"ScaleRendering", 1, ini) == 1;
-            initialViewSize.cx = GetPrivateProfileIntW(L"window", L"Width", 1024, ini);
-            initialViewSize.cy = GetPrivateProfileIntW(L"window", L"Height", 576, ini);
-            if (scaleRenderingEnabled)
-                minimumViewSize = lakefix::ScaledMinimum(
-                    GetPrivateProfileIntW(L"window", L"MinWidth", lakefix::kScaledMinWidth, ini),
-                    GetPrivateProfileIntW(L"window", L"MinHeight", lakefix::kScaledMinHeight, ini));
-            renderSize.cx = GetPrivateProfileIntW(L"render", L"Width", 1088, ini);
-            renderSize.cy = GetPrivateProfileIntW(L"render", L"Height", 612, ini);
-            smoothFontsEnabled = GetPrivateProfileIntW(L"render", L"SmoothFonts", 1, ini) == 1;
-            systemCursorEnabled = GetPrivateProfileIntW(L"input", L"SystemCursor", 1, ini) == 1;
+    wchar_t* slash = wcsrchr(ini, L'\\');
+    if (!length || length >= ARRAYSIZE(ini) || !slash ||
+        wcscpy_s(slash + 1, ARRAYSIZE(ini) - (slash + 1 - ini), L"LakeWindowedFix.ini") != 0) return false;
+    const HANDLE held = CreateFileW(ini, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (held == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND) return false;
+    if (held != INVALID_HANDLE_VALUE) {
+        BY_HANDLE_FILE_INFORMATION identity{};
+        if (!GetFileInformationByHandle(held, &identity) || identity.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) ||
+            identity.nFileSizeHigh || identity.nFileSizeLow > LAKE_FIX_MAX_INI_BYTES) { CloseHandle(held); return false; }
+        sessionConfig.adjacentIni = true;
+    }
+    const bool loaded = lakefix::ReadSessionConfig([&](const wchar_t* section, const wchar_t* name, wchar_t* text, DWORD capacity) noexcept {
+        if (held == INVALID_HANDLE_VALUE) return lakefix::kConfigMissing;
+        const DWORD count = GetPrivateProfileStringW(section, name, L"\x01", text, capacity, ini);
+        return count == 1 && text[0] == L'\x01' ? lakefix::kConfigMissing : count;
+    }, sessionConfig);
+    if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
+    if (!loaded) return false;
+    using lakefix::ConfigKey;
+    nativeResizeEnabled = sessionConfig.Get(ConfigKey::NativeResize) != 0;
+    scaleRenderingEnabled = sessionConfig.Get(ConfigKey::ScaleRendering) != 0;
+    initialViewSize = {sessionConfig.Get(ConfigKey::WindowWidth), sessionConfig.Get(ConfigKey::WindowHeight)};
+    minimumViewSize = {sessionConfig.Get(ConfigKey::MinWidth), sessionConfig.Get(ConfigKey::MinHeight)};
+    renderSize = {sessionConfig.Get(ConfigKey::CanvasWidth), sessionConfig.Get(ConfigKey::CanvasHeight)};
+    smoothFontsEnabled = sessionConfig.Get(ConfigKey::SmoothFonts) != 0;
+    systemCursorEnabled = sessionConfig.Get(ConfigKey::SystemCursor) != 0;
+    if (scaleRenderingEnabled && systemCursorEnabled) {
+        systemArrow = LoadCursorW(nullptr, IDC_ARROW);
+        if (!systemArrow) {
+            auto& value = sessionConfig.values[static_cast<unsigned>(ConfigKey::SystemCursor)];
+            value.applied = 0;
+            value.resolution = lakefix::ConfigResolution::ResourceUnavailable;
+            systemCursorEnabled = false;
+            if (!lakefix::HashEffectiveConfig(sessionConfig)) return false;
+            Log(L"SystemCursor unavailable: shared Windows arrow could not be loaded; legacy cursor retained", true);
         }
     }
-    // Missing INI uses the new safe scaling mode, not native resource rebuild.
-    if (!length || length >= ARRAYSIZE(ini) || !wcsrchr(ini, L'\\')) scaleRenderingEnabled = !nativeResizeEnabled;
-    if (initialViewSize.cx < 320 || initialViewSize.cx > 8192) initialViewSize.cx = 1024;
-    if (initialViewSize.cy < 180 || initialViewSize.cy > 8192) initialViewSize.cy = 576;
-    if (renderSize.cx < 1024 || renderSize.cx > 4096) renderSize.cx = 1088;
-    if (renderSize.cy < 600 || renderSize.cy > 4096) renderSize.cy = 612;
+    configurationLoaded.store(true);
+    for (unsigned i = 0; i < static_cast<unsigned>(ConfigKey::Count); ++i) {
+        const auto& definition = lakefix::configDefinitions[i];
+        const auto& value = sessionConfig.values[i];
+        const wchar_t* origin = value.origin == lakefix::ConfigOrigin::Requested ? L"requested-valid" :
+            value.origin == lakefix::ConfigOrigin::InvalidDefault ? L"invalid-replaced-by-default" : L"missing-default";
+        const wchar_t* resolution = value.resolution == lakefix::ConfigResolution::CompatibilityMode ? L"overridden-by-compatibility-mode" :
+            value.resolution == lakefix::ConfigResolution::ResourceUnavailable ? L"resource-unavailable-fallback" : L"unchanged";
+        wchar_t line[256]{};
+        if (value.origin == lakefix::ConfigOrigin::Requested)
+            swprintf_s(line, L"Config [%ls] %ls requested-numeric=%ld effective=%ld status=%ls resolution=%ls", definition.section, definition.name,
+                       value.requested, value.applied, origin, resolution);
+        else
+            swprintf_s(line, L"Config [%ls] %ls requested=%ls effective=%ld status=%ls resolution=%ls", definition.section, definition.name,
+                       value.origin == lakefix::ConfigOrigin::InvalidDefault ? L"invalid-not-logged" : L"absent", value.applied, origin, resolution);
+        Log(line, true);
+    }
+    wchar_t fingerprint[192]{};
+    swprintf_s(fingerprint, L"Config immutable schema=%d source=%ls effective-sha256=%hs; changes apply next launch", LAKE_FIX_CONFIG_SCHEMA,
+               sessionConfig.adjacentIni ? L"adjacent-ini" : L"defaults", sessionConfig.effectiveSha256);
+    Log(fingerprint, true);
     if (scaleRenderingEnabled) {
         Log(L"ScaleRendering=1: resizable scaled presentation; fixed virtual canvas; no native graphics rebuild");
-        return;
+        return true;
     }
     Log(nativeResizeEnabled ? L"NativeResize=1: EXPERIMENTAL graphics teardown/rebuild enabled"
-                            : L"NativeResize=0: original framebuffer size retained; no native graphics rebuild");
+                             : L"NativeResize=0: original framebuffer size retained; no native graphics rebuild");
+    return true;
 }
 
 DWORD FrameStyle(DWORD style) {
@@ -275,7 +319,10 @@ bool CaptureInputGeometry(InputGeometry& geometry, bool screenCoordinates = fals
 }
 
 bool ScaledViewport(HWND window, LONG width, LONG height, RECT* full, RECT* fitted) noexcept {
-    if (window != client || width <= 0 || height <= 0 || width > 16384 || height > 16384) return false;
+    if (window != client || width != renderSize.cx || height != renderSize.cy) return false;
+#if !defined(LAKE_FIX_TESTING)
+    if (!canvasLayoutSeeded) return false;
+#endif
     const DWORD saved = GetLastError();
     RECT area{}, view{};
     POINT origin{};
@@ -285,13 +332,50 @@ bool ScaledViewport(HWND window, LONG width, LONG height, RECT* full, RECT* fitt
         OffsetRect(&view, origin.x, origin.y);
         *full = area;
         *fitted = view;
-        presentationSize.store(MAKELONG(width, height));
     }
     SetLastError(saved);
     return valid;
 }
 
+HRESULT AdmitScaledPresentation(HWND window) noexcept {
+#if defined(LAKE_FIX_TESTING)
+    // Synthetic window fixtures do not execute proprietary RVAs. The production
+    // policy below is covered independently as logic and in the COM admission test.
+    return lakefix::ScaledLayoutAdmission(scaleRenderingEnabled && window == client, true);
+#else
+    const HRESULT admission = lakefix::ScaledLayoutAdmission(scaleRenderingEnabled && window == client, canvasLayoutSeeded);
+    if (FAILED(admission)) {
+        startupFailure.store(static_cast<DWORD>(admission));
+        if (!layoutAdmissionFailureLogged.exchange(true)) {
+            Log(L"Startup failed stage=layout-admission reason=eligible-frame-before-admitted-layout action=close-normally-and-review-matching-Build-007; frame rejected, NEVER native scaled fallback", true);
+            // Request native cleanup on its UI thread, after startup modals.
+            // No arbitrary kill, synchronous UI call or I/O on the renderer.
+            if (client && startupFailedMessage)
+                PostMessageW(client, startupFailedMessage, static_cast<WPARAM>(static_cast<DWORD>(admission)), 0);
+        }
+    }
+    return admission;
+#endif
+}
+
+void CommitPresentation(HWND window, LONG width, LONG height, const RECT*, const RECT*) noexcept {
+    if (window != client || width != renderSize.cx || height != renderSize.cy) return;
+    presentationSize.store(MAKELONG(width, height));
+    if (!(startupStages.fetch_or(FirstPresentation) & FirstPresentation))
+        Log(L"Startup stage=first-presentation HRESULT=success; not prolonged stability, audio health or proof of pixels", true);
+}
+
 void PresenterLog(const wchar_t* message) noexcept { Log(message, true); }
+
+bool DiagnosticStats(void*, lakefix::diagnostics::PresenterStats& output) noexcept {
+    const auto stats = lakefix::GetScalePresenterStats();
+    output = {stats.directDrawObjects, stats.primarySurfaces, stats.liveProxyObjects, stats.ownerContexts};
+    wchar_t stages[320]{};
+    swprintf_s(stages, L"Session stages=0x%08lx last-observed-failure=0x%08lx; no-presentation intervals/modals are not crash evidence; cursor-pairs=%lu zero=%lu truncated=%lu accumulation=disabled",
+               startupStages.load(), startupFailure.load(), cursorPairCount.load(), cursorZeroDeltaCount.load(), cursorTruncatedDeltaCount.load());
+    Log(stages, true);
+    return true; // These proxy counts do not measure all native/GPU memory.
+}
 
 HWND ClipWindow(HWND window) noexcept {
     // Clip to the visible host, not the fixed-size child. Otherwise enlarging
@@ -355,13 +439,21 @@ bool MapScreenPoint(const InputGeometry& geometry, POINT real, POINT& mapped) {
 }
 
 bool RendererCallsite(const void* caller, ULONG_PTR rva) {
-    return renderer && reinterpret_cast<ULONG_PTR>(caller) == reinterpret_cast<ULONG_PTR>(renderer) + rva;
+#if defined(LAKE_FIX_TESTING)
+    (void)caller; (void)rva;
+    return false; // Synthetic modules can NEVER admit proprietary Build 007 RVAs.
+#else
+    const auto renderer = VerifiedRenderer();
+    return renderer.module && rva < renderer.bytes &&
+        reinterpret_cast<ULONG_PTR>(caller) == reinterpret_cast<ULONG_PTR>(renderer.module) + rva;
+#endif
 }
 
 bool RendererAddress(const void* caller) {
     const ULONG_PTR address = reinterpret_cast<ULONG_PTR>(caller);
-    const ULONG_PTR base = reinterpret_cast<ULONG_PTR>(renderer);
-    return renderer && address >= base && address - base < rendererBytes;
+    const auto renderer = VerifiedRenderer();
+    const ULONG_PTR base = reinterpret_cast<ULONG_PTR>(renderer.module);
+    return renderer.module && address >= base && address - base < renderer.bytes;
 }
 
 bool UseSystemCursor() { return scaleRenderingEnabled && systemCursorEnabled && systemArrow; }
@@ -376,7 +468,7 @@ int WINAPI HookShowCursor(BOOL show) {
     const void* caller = LAKE_CALLER_ADDRESS();
     const DWORD saved = GetLastError();
     const ULONG_PTR rva = RendererAddress(caller)
-        ? reinterpret_cast<ULONG_PTR>(caller) - reinterpret_cast<ULONG_PTR>(renderer) : 0;
+        ? reinterpret_cast<ULONG_PTR>(caller) - reinterpret_cast<ULONG_PTR>(VerifiedRenderer().module) : 0;
     if (!lakefix::ShouldVirtualizeCursorVisibility(UseSystemCursor(), client != nullptr,
                                                   GetCurrentThreadId() == uiThreadId.load(), rva)) {
         SetLastError(saved);
@@ -461,7 +553,7 @@ int WINAPI HookMapWindowPoints(HWND from, HWND to, LPPOINT points, UINT count) {
     const DWORD saved = GetLastError();
     if (UseSystemCursor() && from == nullptr && to == client && count == 2 && points &&
          RendererAddress(caller) && lakefix::IsCursorPaintReturn(
-             reinterpret_cast<ULONG_PTR>(caller) - reinterpret_cast<ULONG_PTR>(renderer))) {
+              reinterpret_cast<ULONG_PTR>(caller) - reinterpret_cast<ULONG_PTR>(VerifiedRenderer().module))) {
         [[maybe_unused]] lakefix::profile::Scope timing(lakefix::profile::Metric::CursorPaint);
         // Outside this host, leave the other application's cursor alone and
         // suppress Lake's stale bitmap. Inside, suppress only after confirming
@@ -536,7 +628,7 @@ BOOL WINAPI HookCursorPosition(LPPOINT point) {
                     // Verified build-007 getter -> offset -> setter pair. Retain
                     // exactly the geometry that produced this virtual point.
                     // Other setters keep physical/screen semantics.
-                    if (RendererCallsite(caller, 0x36fc43))
+                    if (RendererCallsite(caller, lakefix::build007::cursorGetterReturn))
                         cursorRoundTrip = {true, client, real, *point, geometry.viewport, geometry.source};
                 }
             }
@@ -551,9 +643,16 @@ BOOL WINAPI HookSetCursorPosition(int x, int y) {
     const CursorRoundTrip previous = cursorRoundTrip;
     cursorRoundTrip.armed = false;
     if (previous.armed && client == previous.window && scaleRenderingEnabled &&
-        RendererCallsite(caller, 0x36fc55)) {
+        RendererCallsite(caller, lakefix::build007::cursorSetterReturn)) {
         const SIZE view{previous.viewport.right - previous.viewport.left, previous.viewport.bottom - previous.viewport.top};
         const POINT real = lakefix::TranslateCursorDelta(previous.real, previous.virtualPoint, {x, y}, view, previous.source);
+        if (sessionConfig.Get(lakefix::ConfigKey::DetailedInput)) {
+            cursorPairCount.fetch_add(1, std::memory_order_relaxed);
+            if (x == previous.virtualPoint.x && y == previous.virtualPoint.y)
+                cursorZeroDeltaCount.fetch_add(1, std::memory_order_relaxed);
+            else if (real.x == previous.real.x && real.y == previous.real.y)
+                cursorTruncatedDeltaCount.fetch_add(1, std::memory_order_relaxed);
+        }
         x = real.x;
         y = real.y;
     }
@@ -576,6 +675,16 @@ void MapMessagePoint(MSG* message) {
         HWND target = GetCapture();
         const bool captured = target == client || IsChild(client, target);
         POINT source = TransformInputPoint(geometry, raw, captured);
+        const bool down = message->message == WM_LBUTTONDOWN || message->message == WM_RBUTTONDOWN ||
+            message->message == WM_MBUTTONDOWN || message->message == WM_XBUTTONDOWN ||
+            message->message == WM_LBUTTONDBLCLK || message->message == WM_RBUTTONDBLCLK ||
+            message->message == WM_MBUTTONDBLCLK || message->message == WM_XBUTTONDBLCLK;
+        if (down && !lakefix::ViewportContains(geometry.viewport, raw)) {
+            // A child's capture belongs to the existing drag, not to a NEW
+            // margin click. Route through main's fresh hit-test rejection;
+            // subsequent moves/releases still go to the original native capture.
+            target = client;
+        }
         if (target != client && !IsChild(client, target)) {
             target = client;
             if (source.x >= 0 && source.y >= 0) {
@@ -609,27 +718,38 @@ BOOL WINAPI HookClientRectangle(HWND window, LPRECT rectangle) {
     const void* caller = LAKE_CALLER_ADDRESS();
     const BOOL result = GetClientRect(window, rectangle);
     const DWORD error = GetLastError();
-    if (result && rectangle && window == client && scaleRenderingEnabled && !canvasLayoutSeeded &&
-        RendererCallsite(caller, 0x369005) && rectangle->right == renderSize.cx && rectangle->bottom == renderSize.cy) {
+    if (window == client && scaleRenderingEnabled && !canvasLayoutSeeded &&
+        RendererCallsite(caller, lakefix::build007::layoutReturn)) {
         // Build 007 uses display dimensions both to choose an adapter mode and
         // to seed its layout. Leave capability/mode enumeration truthful, then
         // seed ONLY the two writable layout dimensions after mode selection,
         // at the original windowed-surface GetClientRect query. No code patch,
         // GPU reset, display-mode spoof, or periodic resize writes are involved.
-        constexpr ULONG_PTR dimensionsRva = 0xc8aa34;
-        auto* dimensions = reinterpret_cast<LONG*>(reinterpret_cast<BYTE*>(renderer) + dimensionsRva);
+        constexpr ULONG_PTR dimensionsRva = lakefix::build007::layoutDimensions;
+        const auto renderer = VerifiedRenderer();
+        auto* dimensions = reinterpret_cast<LONG*>(reinterpret_cast<ULONG_PTR>(renderer.module) + dimensionsRva);
         MEMORY_BASIC_INFORMATION memory{};
-        const bool valid = dimensionsRva + 2 * sizeof(LONG) <= rendererBytes &&
+        const bool valid = result && rectangle && rectangle->right == renderSize.cx && rectangle->bottom == renderSize.cy &&
             VirtualQuery(dimensions, &memory, sizeof(memory)) == sizeof(memory) &&
-            memory.State == MEM_COMMIT && (memory.Protect & 0xff) == PAGE_READWRITE &&
-            reinterpret_cast<ULONG_PTR>(dimensions + 2) <= reinterpret_cast<ULONG_PTR>(memory.BaseAddress) + memory.RegionSize &&
-            dimensions[0] > 0 && dimensions[1] > 0 && dimensions[0] <= 32768 && dimensions[1] <= 32768;
+            lakefix::LayoutMemoryAdmitted(memory, reinterpret_cast<ULONG_PTR>(renderer.module), renderer.bytes, dimensionsRva) &&
+            lakefix::LayoutValuesAdmitted(dimensions[0], dimensions[1]);
         if (valid) {
             dimensions[0] = renderSize.cx;
             dimensions[1] = renderSize.cy;
             canvasLayoutSeeded = true;
+            startupStages.fetch_or(LayoutAdmitted);
             Log(L"Virtual canvas layout seeded after native adapter/mode selection", true);
-        } else Log(L"Virtual canvas layout unavailable: writable build-007 dimension guard failed", true);
+        } else {
+            startupFailure.store(ERROR_INVALID_DATA);
+            Log(L"Startup failed stage=layout reason=writable-build-007-dimension-guard action=close-and-review-compatible-build; no native scaled fallback", true);
+            // A refused layout may not proceed with a native image and scaled
+            // input. This is an explicit startup admission failure, not a watchdog
+            // reacting to a modal, a long frame, memory pressure or audio state.
+            // This includes admission of a newly recreated canvas: never let a
+            // failed layout return to a native image with scaled coordinates.
+            lakefix::diagnostics::Shutdown(250);
+            ExitProcess(ERROR_INVALID_DATA);
+        }
     }
     SetLastError(error);
     return result;
@@ -648,12 +768,17 @@ bool ResolveDrawCreateEx() {
 HRESULT WINAPI HookDrawCreateEx(GUID* guid, void** object, const GUID& iid, void* outer) {
     const auto original = originalDrawCreateEx.load();
     if (!original) return static_cast<HRESULT>(0x80004005L);
-    const HRESULT result = original(guid, object, iid, outer);
+    HRESULT result = original(guid, object, iid, outer);
     const DWORD saved = GetLastError();
     static constexpr GUID draw7{0x15e65ec0, 0x3b9c, 0x11d2, {0xb9, 0x2f, 0, 0x60, 0x97, 0x97, 0xea, 0x5b}};
-    if (SUCCEEDED(result) && object && *object && memcmp(&iid, &draw7, sizeof(iid)) == 0 &&
-        !lakefix::WrapDirectDraw7(object))
-        Log(L"Scaled presentation unavailable: could not wrap the DirectDraw7 object", true);
+    if (memcmp(&iid, &draw7, sizeof(iid)) == 0) {
+        result = lakefix::CompleteScaledDirectDrawCreation(result, object);
+        if (SUCCEEDED(result)) startupStages.fetch_or(GraphicsProxyAvailable);
+        else {
+            startupFailure.store(static_cast<DWORD>(result));
+            Log(L"Startup failed stage=DirectDraw-proxy reason=native-or-proxy-creation-failed action=review-HRESULT-and-matching-package; no fail-open object", true);
+        }
+    }
     SetLastError(saved);
     return result;
 }
@@ -675,15 +800,7 @@ void InitialPlacement(HWND window) {
         Log(L"Initial placement complete WITHOUT WM_SIZE or framebuffer size change");
         return;
     }
-    wchar_t ini[32768]{};
-    GetModuleFileNameW(self, ini, ARRAYSIZE(ini));
-    wchar_t* slash = wcsrchr(ini, L'\\');
-    if (slash) wcscpy_s(slash + 1, ARRAYSIZE(ini) - (slash + 1 - ini), L"LakeWindowedFix.ini");
-    // Bound values before arithmetic (GetPrivateProfileInt also accepts negatives).
-    UINT width = GetPrivateProfileIntW(L"window", L"Width", 1024, ini);
-    UINT height = GetPrivateProfileIntW(L"window", L"Height", 768, ini);
-    if (width < 800 || width > 8192) width = 1024;
-    if (height < 600 || height > 8192) height = 768;
+    const LONG width = initialViewSize.cx, height = initialViewSize.cy;
     MONITORINFO monitor{};
     monitor.cbSize = sizeof(monitor);
     if (!GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor))
@@ -715,6 +832,13 @@ void InitialPlacement(HWND window) {
 
 LRESULT CALLBACK HostProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
                           UINT_PTR, DWORD_PTR) {
+    if (message == startupFailedMessage) {
+        fatalStartupCode = static_cast<DWORD>(wparam);
+        SetPropW(window, L"LakeWindowedFix.StartupFailure", reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(fatalStartupCode)));
+        closeAfterStartup = true;
+        if (ready) { closeAfterStartup = false; PostMessageW(window, WM_CLOSE, 0, 0); }
+        return 0;
+    }
     if (UseSystemCursor() && message == WM_SETCURSOR) {
         EnsureCursorVisible();
         if (LOWORD(lparam) == HTCLIENT) {
@@ -826,6 +950,15 @@ LRESULT CALLBACK HostProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
             Log(L"Host close deferred until native startup dialogs complete", true);
             return 0;
         }
+        if (fatalStartupCode && !fatalStartupNotified) {
+            fatalStartupNotified = true;
+#if !defined(LAKE_FIX_TESTING)
+            MessageBoxW(window,
+                L"A inicializacao em janela foi recusada.\r\n\r\nEtapa: admissao do layout. Motivo: apresentacao antes de validar o canvas Build 007.\r\n\r\nFeche normalmente e confira o pacote e o diagnostico. Nenhuma imagem nativa com coordenadas escaladas sera apresentada. A confirmacao de fechamento do Lake continua sendo respeitada.",
+                L"Lake Windowed Fix - Falha de inicializacao", MB_OK | MB_ICONERROR);
+#endif
+            Log(L"Controlled startup failure: UI requests original WM_CLOSE after modals; native confirmation/veto/cleanup retained", true);
+        }
         Log(L"Host WM_CLOSE: forwarding to original client", true);
         // The real main WndProc owns confirmations/cleanup. A frame close must
         // not destroy its child behind its back or ignore an application veto.
@@ -846,11 +979,14 @@ LRESULT CALLBACK HostProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
         RestoreCursorVisibility();
         Log(L"Host WM_NCDESTROY", true);
         RemovePropW(window, L"LakeWindowedFix.HostSetupCompleted");
+        RemovePropW(window, L"LakeWindowedFix.StartupFailure");
         RemoveWindowSubclass(window, HostProc, kSubclass);
         host = nullptr;
         ready = false;
         readyQueued = false;
         closeAfterStartup = false;
+        fatalStartupCode = 0;
+        fatalStartupNotified = false;
         sizing = pendingSize = false;
         break;
     }
@@ -906,7 +1042,7 @@ LRESULT CALLBACK ClientProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                    static_cast<unsigned long>(wparam), LOWORD(lparam), HIWORD(lparam));
         Log(text, true);
     }
-    if (message == readyMessage) {
+    if (message == readyMessage || message == startupFailedMessage) {
         if (window == client && host) return SendMessageW(host, message, wparam, lparam);
         return 0;
     }
@@ -937,6 +1073,7 @@ LRESULT CALLBACK ClientProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         Log(L"Client WM_NCDESTROY", true);
         RemoveWindowSubclass(window, ClientProc, kSubclass);
         client = nullptr;
+        startupStages.fetch_or(ShutdownObserved);
         // Don't recursively destroy a parent while its child is in teardown.
         if (host) PostMessageW(host, clientGoneMessage, 0, 0);
     }
@@ -1034,7 +1171,9 @@ bool AttachClient(HWND window) {
     originalClientSize = {rectangle.right - rectangle.left, rectangle.bottom - rectangle.top};
     presentationSize.store(0);
     canvasLayoutSeeded = false;
+    layoutAdmissionFailureLogged.store(false);
     client = window;
+    startupStages.fetch_or(HostCanvasPrepared);
     // WM_CREATE can build the native controls before client is assigned. The
     // enumeration includes nested descendants, without touching owned dialogs.
     if (UseSystemCursor()) EnumChildWindows(window, AttachExistingChildCursor, 0);
@@ -1067,6 +1206,7 @@ BOOL WINAPI HookMessageA(LPMSG message, HWND window, UINT first, UINT last) {
     const bool fromApplication = CalledFromApplication(caller);
     if (fromApplication) QueueReadyAtMainLoop();
     const BOOL result = GetMessageA(message, window, first, last);
+    if (result > 0 && GetCurrentThreadId() == uiThreadId.load()) startupStages.fetch_or(ResponsivenessObserved);
     const DWORD error = GetLastError();
     if (result == 0) {
         ObserveQuitRemoval(message);
@@ -1082,6 +1222,7 @@ BOOL WINAPI HookMessageW(LPMSG message, HWND window, UINT first, UINT last) {
     const bool fromApplication = CalledFromApplication(caller);
     if (fromApplication) QueueReadyAtMainLoop();
     const BOOL result = GetMessageW(message, window, first, last);
+    if (result > 0 && GetCurrentThreadId() == uiThreadId.load()) startupStages.fetch_or(ResponsivenessObserved);
     const DWORD error = GetLastError();
     if (result == 0) {
         ObserveQuitRemoval(message);
@@ -1249,12 +1390,14 @@ void WINAPI HookQuit(int code) {
 }
 
 [[noreturn]] void WINAPI HookExit(UINT code) {
+    startupStages.fetch_or(ShutdownObserved);
     LogSite(L"Application ExitProcess", code, LAKE_CALLER_ADDRESS(), true);
     if constexpr (lakefix::profile::kEnabled) {
         static std::atomic<bool> reported{false};
         if (!reported.exchange(true, std::memory_order_relaxed))
             lakefix::profile::Report(PresenterLog, L"observed-ExitProcess-call");
     }
+    lakefix::diagnostics::Shutdown(250); // Bounded control path, never VEH/render/DllMain.
     ExitProcess(code);
 }
 
@@ -1283,30 +1426,94 @@ LONG WINAPI HookDisplayExW(LPCWSTR name, DEVMODEW* mode, HWND window, DWORD flag
 
 bool PatchModule(HMODULE module);
 
+bool AdmitLoadedRenderer(HMODULE module) {
+    const auto cached = VerifiedRenderer();
+    if (cached.module == module) return true; // Lifetime is guaranteed by PIN below.
+    if (cached.module) {
+        Log(L"Contour load refused: another module/base cannot replace the session-pinned admitted renderer", true);
+        SetLastError(ERROR_REVISION_MISMATCH);
+        return false;
+    }
+    if (admittedContour == INVALID_HANDLE_VALUE) { SetLastError(ERROR_INVALID_STATE); return false; }
+    wchar_t path[32768]{}, canonical[32768]{};
+    const DWORD count = GetModuleFileNameW(module, path, ARRAYSIZE(path));
+    if (!count) return false;
+    if (count >= ARRAYSIZE(path)) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return false; }
+    const HANDLE actual = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (actual == INVALID_HANDLE_VALUE) return false;
+    BY_HANDLE_FILE_INFORMATION identity{};
+    const DWORD canonicalLength = GetFinalPathNameByHandleW(actual, canonical, ARRAYSIZE(canonical), FILE_NAME_NORMALIZED);
+    const bool valid = GetFileInformationByHandle(actual, &identity) && canonicalLength && canonicalLength < ARRAYSIZE(canonical) &&
+        !(identity.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) &&
+        lakefix::SameFileIdentity(identity, admittedContourIdentity) && _wcsicmp(canonical, admittedContourPath) == 0;
+    CloseHandle(actual);
+    if (!valid) {
+        startupFailure.store(ERROR_FILE_INVALID);
+        Log(L"Startup failed stage=loaded-Contour-identity reason=path-or-file-id-changed action=restore-matching-admitted-installation; no RVAs admitted", true);
+        SetLastError(ERROR_FILE_INVALID);
+        return false;
+    }
+    const ULONG_PTR bytes = ImageBytes(module);
+    HMODULE pinned{};
+    if (!bytes) { SetLastError(ERROR_BAD_EXE_FORMAT); return false; }
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                           reinterpret_cast<LPCWSTR>(module), &pinned)) return false;
+    if (pinned != module) { SetLastError(ERROR_INVALID_STATE); return false; }
+    rendererImage.store((static_cast<std::uint64_t>(bytes) << 32) |
+                        static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(module)), std::memory_order_release);
+    Log(L"Loaded Contour canonical path/file identity matches retained SHA256-verified file; RVA scope admitted", true);
+    return true;
+}
+
+bool ContourRequested(const char* name) {
+    if (!name || reinterpret_cast<ULONG_PTR>(name) <= 0xffff) return false;
+    const char* base = name;
+    for (const char* p = name; *p; ++p) if (*p == '\\' || *p == '/') base = p + 1;
+    return _stricmp(base, "Contour.dll") == 0;
+}
+bool ContourRequested(const wchar_t* name) {
+    if (!name || reinterpret_cast<ULONG_PTR>(name) <= 0xffff) return false;
+    const wchar_t* base = name;
+    for (const wchar_t* p = name; *p; ++p) if (*p == L'\\' || *p == L'/') base = p + 1;
+    return _wcsicmp(base, L"Contour.dll") == 0;
+}
+bool ContourResult(HMODULE module) {
+    if (!module) return false;
+    if (module == VerifiedRenderer().module) return true;
+    wchar_t path[32768]{};
+    const DWORD count = GetModuleFileNameW(module, path, ARRAYSIZE(path));
+    return count && count < ARRAYSIZE(path) && ContourRequested(path);
+}
+
 HMODULE WINAPI HookLoadA(LPCSTR name) {
     HMODULE module = LoadLibraryA(name);
     const DWORD error = GetLastError();
-    if (module && module == GetModuleHandleW(L"Contour.dll")) { renderer = module; rendererBytes = ImageBytes(module); }
-    if (module && module == GetModuleHandleW(L"Contour.dll") && (!ResolveDrawCreateEx() || !PatchModule(module))) {
+    const bool contour = module && (ContourRequested(name) || ContourResult(module));
+    if (contour &&
+        (!AdmitLoadedRenderer(module) || !ResolveDrawCreateEx() || !PatchModule(module))) {
         // Don't let the caller initialize a partially hooked graphics module.
+        const DWORD failure = GetLastError();
         FreeLibrary(module);
-        SetLastError(ERROR_INVALID_FUNCTION);
+        SetLastError(failure ? failure : ERROR_INVALID_FUNCTION);
         return nullptr;
     }
-    if (module && module == GetModuleHandleW(L"Contour.dll")) Log(L"Contour imports patched after LoadLibraryA");
+    if (contour) Log(L"Contour imports patched after LoadLibraryA");
     SetLastError(error);
     return module;
 }
 HMODULE WINAPI HookLoadW(LPCWSTR name) {
     HMODULE module = LoadLibraryW(name);
     const DWORD error = GetLastError();
-    if (module && module == GetModuleHandleW(L"Contour.dll")) { renderer = module; rendererBytes = ImageBytes(module); }
-    if (module && module == GetModuleHandleW(L"Contour.dll") && (!ResolveDrawCreateEx() || !PatchModule(module))) {
+    const bool contour = module && (ContourRequested(name) || ContourResult(module));
+    if (contour &&
+        (!AdmitLoadedRenderer(module) || !ResolveDrawCreateEx() || !PatchModule(module))) {
+        const DWORD failure = GetLastError();
         FreeLibrary(module);
-        SetLastError(ERROR_INVALID_FUNCTION);
+        SetLastError(failure ? failure : ERROR_INVALID_FUNCTION);
         return nullptr;
     }
-    if (module && module == GetModuleHandleW(L"Contour.dll")) Log(L"Contour imports patched after LoadLibraryW");
+    if (contour) Log(L"Contour imports patched after LoadLibraryW");
     SetLastError(error);
     return module;
 }
@@ -1354,24 +1561,31 @@ Hook hooks[] = {
 
 FARPROC WINAPI HookGetProc(HMODULE module, LPCSTR name) {
     FARPROC original = GetProcAddress(module, name);
-    if (!original || reinterpret_cast<ULONG_PTR>(name) <= 0xffff) return original;
-    if (scaleRenderingEnabled && strcmp(name, "DirectDrawCreateEx") == 0 && module == GetModuleHandleW(L"DDRAW.dll")) {
-        originalDrawCreateEx.store(reinterpret_cast<DrawCreateEx>(reinterpret_cast<void*>(original)));
-        return reinterpret_cast<FARPROC>(reinterpret_cast<void*>(HookDrawCreateEx));
-    }
-    for (const auto& hook : hooks) {
+    const DWORD saved = GetLastError();
+    FARPROC result = original;
+    if (original && reinterpret_cast<ULONG_PTR>(name) > 0xffff) {
+        if (scaleRenderingEnabled && strcmp(name, "DirectDrawCreateEx") == 0 && module == GetModuleHandleW(L"DDRAW.dll")) {
+            originalDrawCreateEx.store(reinterpret_cast<DrawCreateEx>(reinterpret_cast<void*>(original)));
+            result = reinterpret_cast<FARPROC>(reinterpret_cast<void*>(HookDrawCreateEx));
+        }
+        for (const auto& hook : hooks) {
         // Compare both module identity and name; never replace another DLL's
         // coincidentally named export. Forwarders are resolved by GetProcAddress.
-        if (!hook.applicationOnly && module == hook.provider && strcmp(name, hook.name) == 0)
-            return reinterpret_cast<FARPROC>(hook.replacement);
+            if (!hook.applicationOnly && module == hook.provider && strcmp(name, hook.name) == 0) {
+                result = reinterpret_cast<FARPROC>(hook.replacement);
+                break;
+            }
+        }
     }
-    return original;
+    SetLastError(saved);
+    return result;
 }
 
 bool ReplaceImport(PVOID volatile* slot, PVOID replacement, PVOID expected) {
     if (*slot == replacement) return true;
     if (!expected || *slot != expected) {
         Log(L"Refusing to overwrite a third-party IAT hook", true);
+        SetLastError(ERROR_ALREADY_EXISTS);
         return false;
     }
     DWORD protection{};
@@ -1379,7 +1593,9 @@ bool ReplaceImport(PVOID volatile* slot, PVOID replacement, PVOID expected) {
     const PVOID previous = InterlockedCompareExchangePointer(slot, replacement, expected);
     DWORD ignored{};
     const bool restored = VirtualProtect(const_cast<PVOID*>(slot), sizeof(PVOID), protection, &ignored) != FALSE;
-    return restored && (previous == expected || previous == replacement);
+    if (!restored) return false;
+    if (previous != expected && previous != replacement) { SetLastError(ERROR_ALREADY_EXISTS); return false; }
+    return true;
 }
 
 bool PatchModule(HMODULE module) {
@@ -1390,7 +1606,8 @@ bool PatchModule(HMODULE module) {
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
     auto* nt = reinterpret_cast<IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
     bool success = dos->e_magic == IMAGE_DOS_SIGNATURE && nt->Signature == IMAGE_NT_SIGNATURE &&
-                   nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+                    nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+    if (!success) SetLastError(ERROR_BAD_EXE_FORMAT);
     if (success) {
         const auto dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
         if (dir.VirtualAddress && dir.Size >= sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
@@ -1424,29 +1641,124 @@ bool PatchModule(HMODULE module) {
 }
 } // namespace
 
-extern "C" DWORD WINAPI LakeWindowedInitialize(void*) {
+namespace {
+bool AccessibleMemory(const void* pointer, SIZE_T bytes, bool writable = false) {
+    auto cursor = reinterpret_cast<ULONG_PTR>(pointer);
+    if (!cursor || bytes > ~static_cast<ULONG_PTR>(0) - cursor) return false;
+    const auto end = cursor + bytes;
+    while (cursor < end) {
+        MEMORY_BASIC_INFORMATION memory{};
+        if (VirtualQuery(reinterpret_cast<const void*>(cursor), &memory, sizeof(memory)) != sizeof(memory) ||
+            memory.State != MEM_COMMIT || memory.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+        const DWORD protection = memory.Protect & 0xff;
+        const bool write = protection == PAGE_READWRITE || protection == PAGE_WRITECOPY ||
+                           protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
+        const bool read = write || protection == PAGE_READONLY || protection == PAGE_EXECUTE_READ;
+        if (!read || (writable && !write)) return false;
+        const auto next = reinterpret_cast<ULONG_PTR>(memory.BaseAddress) + memory.RegionSize;
+        if (next <= cursor) return false;
+        cursor = next;
+    }
+    return true;
+}
+
+DWORD AdmitInitializeRequest(const lakefix::InitializeRequest* request) {
+    if (!AccessibleMemory(request, sizeof(*request)) || request->size != sizeof(*request) || request->abi != lakefix::kComponentAbi ||
+        !lakefix::ComponentContractMatches(request->component)) return ERROR_REVISION_MISMATCH;
+    for (const auto reserved : request->reserved) if (reserved) return ERROR_INVALID_PARAMETER;
+    const auto* path = reinterpret_cast<const wchar_t*>(request->contourPath);
+    const size_t length = wcsnlen_s(path, ARRAYSIZE(request->contourPath));
+    if (length < 8 || length >= ARRAYSIZE(request->contourPath)) return ERROR_BAD_PATHNAME;
+    admittedContour = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (admittedContour == INVALID_HANDLE_VALUE) return GetLastError();
+    const auto reject = [](DWORD error) {
+        CloseHandle(admittedContour); admittedContour = INVALID_HANDLE_VALUE; return error;
+    };
+    char digest[65]{}, requestedDigest[65]{};
+    constexpr char digits[] = "0123456789abcdef";
+    for (unsigned i = 0; i < 32; ++i) {
+        requestedDigest[i * 2] = digits[request->contourSha256[i] >> 4];
+        requestedDigest[i * 2 + 1] = digits[request->contourSha256[i] & 15];
+    }
+    if (!GetFileInformationByHandle(admittedContour, &admittedContourIdentity) ||
+        admittedContourIdentity.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) ||
+        !lakefix::Sha256FileHandle(admittedContour, digest)) return reject(ERROR_FILE_INVALID);
+    const auto& expected = request->contourIdentity;
+    const auto& actual = admittedContourIdentity;
+    if (actual.dwVolumeSerialNumber != expected.volumeSerialNumber || actual.nFileIndexHigh != expected.fileIndexHigh ||
+        actual.nFileIndexLow != expected.fileIndexLow || actual.nFileSizeHigh != expected.fileSizeHigh ||
+        actual.nFileSizeLow != expected.fileSizeLow || actual.ftLastWriteTime.dwHighDateTime != expected.lastWriteTimeHigh ||
+        actual.ftLastWriteTime.dwLowDateTime != expected.lastWriteTimeLow || strcmp(digest, requestedDigest)) return reject(ERROR_FILE_INVALID);
+#if !defined(LAKE_FIX_TESTING)
+    if (strcmp(digest, LAKE_BUILD007_CONTOUR_SHA256)) return reject(ERROR_INVALID_IMAGE_HASH);
+    wchar_t executable[32768]{};
+    const DWORD executableLength = GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable));
+    if (!executableLength || executableLength >= ARRAYSIZE(executable)) return reject(ERROR_BAD_PATHNAME);
+    const HANDLE exe = CreateFileW(executable, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (exe == INVALID_HANDLE_VALUE) return reject(GetLastError());
+    const bool admitted = lakefix::Sha256FileHandle(exe, digest) && strcmp(digest, LAKE_BUILD007_EXE_SHA256) == 0;
+    CloseHandle(exe);
+    if (!admitted) return reject(ERROR_INVALID_IMAGE_HASH);
+#endif
+    const DWORD canonicalLength = GetFinalPathNameByHandleW(admittedContour, admittedContourPath, ARRAYSIZE(admittedContourPath), FILE_NAME_NORMALIZED);
+    if (!canonicalLength || canonicalLength >= ARRAYSIZE(admittedContourPath) || _wcsicmp(path, admittedContourPath)) return reject(ERROR_BAD_PATHNAME);
+    return ERROR_SUCCESS;
+}
+} // namespace
+
+extern "C" DWORD WINAPI LakeWindowedQueryContract(void* output) {
+    auto* contract = static_cast<lakefix::ComponentContract*>(output);
+    if (!AccessibleMemory(contract, sizeof(*contract), true) || contract->size != sizeof(*contract)) return ERROR_REVISION_MISMATCH;
+    *contract = lakefix::ExpectedComponentContract();
+    return ERROR_SUCCESS;
+}
+
+#if defined(LAKE_FIX_TESTING)
+extern "C" DWORD WINAPI LakeWindowedFlushDiagnostics(void*) {
+    return lakefix::diagnostics::Flush(2000) ? ERROR_SUCCESS : ERROR_TIMEOUT;
+}
+#endif
+
+extern "C" DWORD WINAPI LakeWindowedInitialize(void* argument) {
     if (InterlockedCompareExchange(&initialization, 1, 0) != 0) return ERROR_ALREADY_INITIALIZED;
+    const DWORD admitted = AdmitInitializeRequest(static_cast<const lakefix::InitializeRequest*>(argument));
+    if (admitted) return admitted;
+    // Required independently of the logger: from the first published callback,
+    // VEH or IAT onwards, no failed initialization path may unload our code.
+    HMODULE pinned{};
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                           reinterpret_cast<LPCWSTR>(&LakeWindowedInitialize), &pinned)) return GetLastError();
     InitializeLog();
+    application = GetModuleHandleW(nullptr);
+    applicationBytes = ImageBytes(application);
+    lakefix::diagnostics::Options diagnosticOptions;
+    diagnosticOptions.buildId = LAKE_FIX_COMPONENT_BUILD_ID;
+    diagnosticOptions.statsCallback = DiagnosticStats;
+    diagnosticOptions.mainImage = {reinterpret_cast<ULONG_PTR>(application), applicationBytes};
+    if (logFile != INVALID_HANDLE_VALUE) {
+        lakefix::diagnostics::Start(logFile, diagnosticOptions);
+        CloseHandle(logFile); logFile = INVALID_HANDLE_VALUE;
+    }
+    startupStages.fetch_or(CompatibleDll);
     Log(L"Initialize begin");
     if constexpr (lakefix::profile::kEnabled) {
         Log(lakefix::profile::Initialize()
             ? L"Diagnostic profiling enabled at build time; bounded QPC aggregates, not displayed FPS"
             : L"Diagnostic profiling unavailable: performance clock initialization failed", true);
     }
-    LoadResizePolicy();
-    if (scaleRenderingEnabled && systemCursorEnabled) {
-        systemArrow = LoadCursorW(nullptr, IDC_ARROW);
-        if (!systemArrow) Log(L"SystemCursor unavailable: shared Windows arrow could not be loaded; legacy cursor retained", true);
+    if (!LoadResizePolicy()) {
+        Log(L"Startup failed stage=config reason=unreadable-unsafe-or-unsupported-schema action=review-INI-with-Lake-closed", true);
+        return ERROR_INVALID_DATA;
     }
-    lakefix::ConfigureScalePresenter(ScaledViewport, PresenterLog, ClipWindow, PaintLetterbox);
-    application = GetModuleHandleW(nullptr);
-    applicationBytes = ImageBytes(application);
-    renderer = GetModuleHandleW(L"Contour.dll");
-    rendererBytes = ImageBytes(renderer);
+    lakefix::ConfigureScalePresenter(ScaledViewport, PresenterLog, ClipWindow, PaintLetterbox, renderSize.cx, renderSize.cy, CommitPresentation, AdmitScaledPresentation);
+    if (const HMODULE loadedRenderer = GetModuleHandleW(L"Contour.dll"))
+        if (!AdmitLoadedRenderer(loadedRenderer)) return ERROR_FILE_INVALID;
     if (!AddVectoredExceptionHandler(1, ObserveException)) Log(L"Exception observer unavailable; exit status still available with --wait");
     readyMessage = RegisterWindowMessageW(L"LakeWindowedFix.Ready.v1");
     clientGoneMessage = RegisterWindowMessageW(L"LakeWindowedFix.ClientGone.v1");
-    if (!readyMessage || !clientGoneMessage) return GetLastError();
+    startupFailedMessage = RegisterWindowMessageW(L"LakeWindowedFix.StartupFailed.v1");
+    if (!readyMessage || !clientGoneMessage || !startupFailedMessage) return GetLastError();
     // Check the launcher-provided native flags. Without them, border changes
     // alone cannot remove DirectDraw exclusive cooperative mode.
     const wchar_t* command = GetCommandLineW();
@@ -1462,11 +1774,8 @@ extern "C" DWORD WINAPI LakeWindowedInitialize(void*) {
     }
     if (!ResolveDrawCreateEx() || !PatchModule(application) || !PatchModule(GetModuleHandleW(L"Contour.dll")))
         return ERROR_INVALID_FUNCTION;
+    startupStages.fetch_or(HooksInstalled);
     // Imports point into this DLL until process exit. Unloading is unsupported.
-    HMODULE pinned;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-                          reinterpret_cast<LPCWSTR>(&LakeWindowedInitialize), &pinned))
-        return GetLastError();
     Log(L"Initialized outside loader lock; native flags present");
     return ERROR_SUCCESS;
 }

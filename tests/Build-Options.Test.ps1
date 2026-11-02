@@ -11,6 +11,7 @@ $mock = Join-Path $sandbox 'mock-zig.ps1'
 [IO.File]::WriteAllText($mock,@'
 $ErrorActionPreference = 'Stop'
 $arguments = @($args)
+if ($arguments.Count -eq 1 -and $arguments[0] -eq 'version') { Write-Output '0.14.1'; $global:LASTEXITCODE = 0; return }
 $index = [Array]::IndexOf($arguments,'-o')
 if ($index -lt 0 -or $index+1 -ge $arguments.Count) { throw 'Unexpected mock compiler arguments.' }
 $output = [IO.Path]::GetFullPath($arguments[$index+1])
@@ -25,6 +26,27 @@ $global:LASTEXITCODE = 0
 '@,[Text.Encoding]::ASCII)
 $previousLog = $env:LAKE_MOCK_COMPILER_LOG
 $previousExit = Get-Variable LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+$symbolAliases = @{}
+foreach ($name in @('Save-LakeOwnLinkSymbols','Test-LakeOwnLinkSymbolRecord')) { $symbolAliases[$name] = Get-Alias $name -Scope Global -ErrorAction SilentlyContinue }
+$symbolMock = 'Invoke-LakeBuildSymbolMock-'+[guid]::NewGuid().ToString('N')
+# Alias precedence substitutes ONLY the symbol I/O layer in this test process.
+# The real build has no skip-symbols switch or production bypass. These are
+# deliberately non-PE mock outputs and are never passed to objcopy/LoadLibrary.
+Set-Item -Path ('Function:global:'+$symbolMock) -Value {
+    param($InputFile,$OutputFile,$SymbolDirectory,$BuildId,$Toolchain,$ObjcopyPath,$RecordFile)
+    $parent = Split-Path $env:LAKE_MOCK_COMPILER_LOG -Parent
+    foreach ($path in @($InputFile,$OutputFile,$SymbolDirectory,$RecordFile) | Where-Object { $_ }) {
+        if (![IO.Path]::GetFullPath($path).StartsWith($parent+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Mock symbols escaped their sandbox.' }
+    }
+    if ($BuildId -cnotmatch '^[a-f0-9]{32}$') { throw 'Mock symbols did not receive the exact build ID.' }
+    if ($InputFile) {
+        if ([IO.File]::ReadAllText($InputFile) -cne 'synthetic compiler output; not a PE binary' -or (Test-Path -LiteralPath $OutputFile)) { throw 'Mock symbol input/output identity error.' }
+        [IO.Directory]::CreateDirectory($SymbolDirectory) | Out-Null
+        [IO.File]::Copy($InputFile,$OutputFile,$false)
+        Add-Content -LiteralPath ($env:LAKE_MOCK_COMPILER_LOG+'.symbols') -Value $BuildId
+    } elseif ([IO.File]::ReadAllText($OutputFile) -cne 'synthetic compiler output; not a PE binary') { throw 'Mock final output changed.' }
+}
+foreach ($name in $symbolAliases.Keys) { Set-Alias -Name $name -Value $symbolMock -Scope Global -Force }
 $script:checks = 0
 function Check([bool]$Condition,[string]$Label) {
     if (!$Condition) { throw "FAIL: $Label" }
@@ -40,6 +62,9 @@ try {
         & (Join-Path $root 'scripts\Build.ps1') -Toolchain Zig -ZigPath $mock -BuildDirectory $build -OutputDirectory $dist -EnableProfiling:$enabled -SkipTests
         $calls = @(Get-Content -LiteralPath $env:LAKE_MOCK_COMPILER_LOG | ForEach-Object { $_ | ConvertFrom-Json })
         Check ($calls.Count -eq 2) "$label build invokes only the two mocked compiles when tests are skipped"
+        $manifest = [IO.File]::ReadAllText((Join-Path $build 'BUILD-PROVENANCE.json')) | ConvertFrom-Json
+        Check (@(Get-Content -LiteralPath ($env:LAKE_MOCK_COMPILER_LOG+'.symbols') | Where-Object { $_ -ceq $manifest.BuildId }).Count -eq 2 -and
+            $manifest.Tests.Results.Count -eq 0 -and $manifest.Arguments.Count -ge 9) "$label build separates both final images with the same build ID and captures actual commands without claiming tests"
         $runtime = @($calls | Where-Object { $_.Arguments -contains (Join-Path $root 'src/fix.cpp') })
         $launcher = @($calls | Where-Object { $_.Arguments -contains (Join-Path $root 'src/launcher.cpp') })
         Check ($runtime.Count -eq 1 -and $launcher.Count -eq 1 -and
@@ -58,6 +83,11 @@ try {
     & (Join-Path $root 'scripts\Build.ps1') -Toolchain Zig -ZigPath $mock -BuildDirectory (Join-Path $sandbox 'normal-build') -OutputDirectory (Join-Path $sandbox 'normal-dist') -SkipTests
     Check ((Get-FileHash -LiteralPath $editedIni).Hash -ceq $before) 'isolated incremental build preserves an edited INI'
 } finally {
+    foreach ($name in $symbolAliases.Keys) {
+        if ($symbolAliases[$name]) { Set-Alias -Name $name -Value $symbolAliases[$name].Definition -Scope Global -Force }
+        else { Remove-Item -LiteralPath ('Alias:global:'+$name) -ErrorAction SilentlyContinue }
+    }
+    Remove-Item -LiteralPath ('Function:global:'+$symbolMock) -ErrorAction SilentlyContinue
     $env:LAKE_MOCK_COMPILER_LOG = $previousLog
     if ($previousExit) { Set-Variable LASTEXITCODE -Scope Global -Value $previousExit.Value }
     else { Remove-Variable LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue }

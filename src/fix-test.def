@@ -1,0 +1,5 @@
+LIBRARY LakeWindowedFix
+EXPORTS
+    LakeWindowedInitialize=LakeWindowedInitialize@4
+    LakeWindowedQueryContract=LakeWindowedQueryContract@4
+    LakeWindowedFlushDiagnostics=LakeWindowedFlushDiagnostics@4

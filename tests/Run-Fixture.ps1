@@ -7,6 +7,9 @@ param(
     [ValidateSet('0', '1')][string]$Profiling = '0'
 )
 $ErrorActionPreference = 'Stop'
+if (@(Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -ieq 'Lake Controller' }).Count) {
+    throw 'NOT EXECUTED: a real Lake process exists. Run window fixtures only in a non-operational test session; no process was changed.'
+}
 if ($ExpectedExit -lt -1 -or $ExpectedExit -gt 255) { throw 'ExpectedExit invalido.' }
 $source = (Resolve-Path -LiteralPath $BinaryDirectory).Path
 $scaleValue = if ($ScaleRendering) { '1' } else { '0' }
@@ -17,6 +20,7 @@ if ($ScaleRendering -and $NativeResize -eq '0' -and $ExpectedExit -lt 0) {
     # Separate hidden-window runs cover production defaults and larger minima.
     $cases = @(
         @{ Name = 'scaled-input'; Width = 1024; Height = 576; Minimum = "MinWidth=320`r`nMinHeight=180`r`n"; PolicyOnly = $false },
+        @{ Name = 'scaled-default-canvas-input'; Width = 1024; Height = 576; Minimum = "MinWidth=320`r`nMinHeight=180`r`n"; PolicyOnly = $false; DefaultCanvas = $true },
         @{ Name = 'scaled-default-minimum'; Width = 1024; Height = 576; Minimum = ''; PolicyOnly = $true },
         @{ Name = 'scaled-custom-minimum'; Width = 320; Height = 180; Minimum = "MinWidth=1200`r`nMinHeight=675`r`n"; PolicyOnly = $true },
         @{ Name = 'scaled-invalid-width'; Width = 320; Height = 180; Minimum = "MinWidth=8193`r`nMinHeight=620`r`n"; PolicyOnly = $true },
@@ -30,11 +34,12 @@ foreach ($case in $cases) {
     $run = Join-Path (Join-Path $source 'test-runs') ([guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $run -Force | Out-Null
     foreach ($name in @('LakeWindowedFix.dll', 'LakeFixInjectionTest.exe', 'LakeFixFixture.exe', 'Contour.dll')) {
-        [System.IO.File]::Copy((Join-Path $source $name), (Join-Path $run $name), $false)
+        $artifact = if ($name -eq 'LakeWindowedFix.dll') { 'LakeWindowedFix.Test.dll' } else { $name }
+        [System.IO.File]::Copy((Join-Path $source $artifact), (Join-Path $run $name), $false)
     }
     # Legacy suites opt out explicitly now that scaling is the production default.
     $ini = "[window]`r`nWidth=$($case.Width)`r`nHeight=$($case.Height)`r`n$($case.Minimum)[compatibility]`r`nScaleRendering=$scaleValue`r`nNativeResize=$NativeResize`r`n"
-    if ($ScaleRendering) { $ini += "[render]`r`nWidth=1536`r`nHeight=864`r`n" }
+    if ($ScaleRendering -and !$case.DefaultCanvas) { $ini += "[render]`r`nWidth=1536`r`nHeight=864`r`n" }
     if ($case.PolicyOnly) { $ini += "[fixture]`r`nWindowPolicyOnly=1`r`n" }
     [System.IO.File]::WriteAllText((Join-Path $run 'LakeWindowedFix.ini'), $ini, [System.Text.Encoding]::ASCII)
     $arguments = @('--app-dir', $run)

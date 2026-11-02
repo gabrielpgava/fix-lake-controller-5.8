@@ -10,6 +10,12 @@
 #include "../src/log_lock.h"
 #include "../src/scale_geometry.h"
 
+// A coincidentally named export in OUR exe, never a DirectDraw implementation.
+// It proves GetProcAddress must preserve native LastError outside DDRAW scope.
+extern "C" __declspec(dllexport) HRESULT WINAPI FixtureNamedDrawFactory(GUID*, void**, const GUID&, void*) {
+    return E_NOTIMPL;
+}
+
 // Entirely synthetic application. No Lake code, audio, network or DirectDraw.
 // Run via LakeFixInjectionTest, which uses the same loader/injection source as
 // the production launcher, but can only start this fixed fixture filename.
@@ -39,6 +45,14 @@ HWND wheelChild;
 bool sendWheelToChild;
 int syntheticChildMouseMessages;
 POINT lastChildMousePoint{};
+SIZE fixtureSource{1536, 864};
+
+bool FlushFixtureDiagnostics() {
+    const HMODULE module = GetModuleHandleW(L"LakeWindowedFix.dll");
+    const auto address = GetProcAddress(module, "LakeWindowedFlushDiagnostics");
+    using Flush = DWORD (WINAPI*)(void*);
+    return address && reinterpret_cast<Flush>(reinterpret_cast<void*>(address))(nullptr) == ERROR_SUCCESS;
+}
 
 LONG CALLBACK HandleSyntheticException(EXCEPTION_POINTERS* info) {
     if (info && info->ExceptionRecord && info->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
@@ -51,6 +65,7 @@ LONG CALLBACK HandleSyntheticException(EXCEPTION_POINTERS* info) {
 }
 
 bool LogContains(const char* expected) {
+    if (!FlushFixtureDiagnostics()) return false; // Test-only control path, never renderer/VEH.
     wchar_t path[1200]{};
     if (!GetModuleFileNameW(nullptr, path, ARRAYSIZE(path))) return false;
     wchar_t* slash = wcsrchr(path, L'\\');
@@ -70,6 +85,40 @@ void Check(bool condition, const char* name) {
     ++checks;
     printf("%s: %s\n", condition ? "PASS" : "FAIL", name);
     if (!condition) ++failures;
+}
+
+void CheckContourSessionIdentity(HMODULE& module) {
+    if (!module) return;
+    wchar_t source[32768]{}, directory[32768]{}, foreign[32768]{};
+    const DWORD length = GetModuleFileNameW(module, source, ARRAYSIZE(source));
+    Check(length && length < ARRAYSIZE(source), "query only the synthetic renderer's own path");
+    if (!length || length >= ARRAYSIZE(source)) return;
+    wcscpy_s(directory, source);
+    wchar_t* slash = wcsrchr(directory, L'\\');
+    if (!slash) return;
+    wcscpy_s(slash + 1, ARRAYSIZE(directory) - (slash + 1 - directory), L"foreign-contour-owned-test");
+    const bool created = CreateDirectoryW(directory, nullptr) != FALSE;
+    Check(created, "create exclusive fixture-owned directory for a same-basename DLL");
+    if (created) {
+        swprintf_s(foreign, L"%ls\\Contour.dll", directory);
+        const bool copied = CopyFileW(source, foreign, TRUE) != FALSE;
+        Check(copied, "copy only the own synthetic renderer with fail-if-exists");
+        if (copied) {
+            const HMODULE other = LoadLibraryW(foreign);
+            const DWORD error = GetLastError();
+            Check(!other && error == ERROR_REVISION_MISMATCH,
+                  "another Contour basename cannot escape identity admission as an unpatched native module");
+            if (other) FreeLibrary(other); // Only the reference created by this test.
+            Check(DeleteFileW(foreign) != FALSE, "foreign synthetic copy is not pinned and can be removed by its creator");
+        }
+        Check(RemoveDirectoryW(directory) != FALSE, "remove only the exclusive empty fixture-owned directory");
+    }
+    const HMODULE expected = module;
+    const bool released = FreeLibrary(module) != FALSE;
+    Check(released && GetModuleHandleW(L"Contour.dll") == expected,
+          "admitted renderer stays pinned after caller ReleaseLibrary so a stale base cannot be recycled");
+    module = LoadLibraryW(source); // Restore exactly the reference consumed above.
+    Check(module == expected, "legitimate reload retains the same admitted renderer identity after rejected foreign load");
 }
 
 void TestScaledWindowSizePolicy() {
@@ -194,7 +243,7 @@ LRESULT NativeFixtureProc(HWND window, UINT message, WPARAM wparam, LPARAM lpara
             // this control away from every existing synthetic hit-test point.
             auto* initialChild = static_cast<HWND*>(creation->lpCreateParams);
             *initialChild = CreateWindowExW(0, L"LakeFix.InputChild", L"", WS_CHILD | WS_VISIBLE,
-                                           1400, 820, 30, 20, window, nullptr, creation->hInstance, nullptr);
+                                           fixtureSource.cx - 100, fixtureSource.cy - 44, 30, 20, window, nullptr, creation->hInstance, nullptr);
         }
     }
     if (message == WM_SIZE) ++nativeClientSizes;
@@ -283,8 +332,8 @@ bool FixedScaledSource(HWND renderer, HWND frame) {
     POINT origin{};
     if (!GetClientRect(renderer, &rectangle)) return false;
     MapWindowPoints(renderer, frame, &origin, 1);
-    return rectangle.left == 0 && rectangle.top == 0 && rectangle.right == 1536 &&
-           rectangle.bottom == 864 && origin.x == 0 && origin.y == 0;
+    return rectangle.left == 0 && rectangle.top == 0 && rectangle.right == fixtureSource.cx &&
+           rectangle.bottom == fixtureSource.cy && origin.x == 0 && origin.y == 0;
 }
 
 // Independent oracle for a captured drag: continue the affine transform on
@@ -317,7 +366,7 @@ void CheckSyntheticMouse(HWND renderer, UINT message, POINT view, POINT expected
 
 void TestScaledMouse(HWND renderer, LONG width, LONG height) {
     printf("Synthetic mouse viewport %ldx%ld (no global cursor movement)\n", width, height);
-    const SIZE source{1536, 864};
+    const SIZE source = fixtureSource;
     const RECT viewport = lakefix::FitViewport(width, height, source.cx, source.cy);
     const POINT center{viewport.left + (viewport.right - viewport.left) / 2,
                        viewport.top + (viewport.bottom - viewport.top) / 2};
@@ -396,13 +445,25 @@ void TestScaledMessagePoints(HWND renderer, HWND frame) {
         GetProcAddress(GetModuleHandleW(L"KernelBase.dll"), "GetProcAddress")));
     Check(lookup != nullptr, "obtain original resolver for message-queue comparison");
     if (!lookup) return;
+    const HMODULE ownModule = GetModuleHandleW(nullptr);
+    SetLastError(0x4c414b45);
+    const auto rawFactory = lookup(ownModule, "DirectDrawCreateEx");
+    const DWORD rawLookupError = GetLastError();
+    SetLastError(0x4c414b45);
+    const auto scopedFactory = GetProcAddress(ownModule, "DirectDrawCreateEx");
+    const DWORD scopedLookupError = GetLastError();
+    Check(rawFactory && scopedFactory == rawFactory && scopedLookupError == rawLookupError,
+          "valid foreign named export preserves native GetProcAddress result and LastError without DDRAW");
+    if (!rawFactory || scopedFactory != rawFactory || scopedLookupError != rawLookupError)
+        printf("  native=%p hooked=%p native-error=0x%08lx hooked-error=0x%08lx\n",
+               reinterpret_cast<void*>(rawFactory), reinterpret_cast<void*>(scopedFactory), rawLookupError, scopedLookupError);
     auto rawPeek = reinterpret_cast<decltype(&PeekMessageW)>(reinterpret_cast<void*>(
         lookup(GetModuleHandleW(L"user32.dll"), "PeekMessageW")));
     Check(rawPeek != nullptr, "obtain original queue peek without fake user input");
     if (!rawPeek) return;
     RECT area{};
     GetClientRect(frame, &area);
-    const SIZE source{1536, 864};
+    const SIZE source = fixtureSource;
     const RECT viewport = lakefix::FitViewport(area.right, area.bottom, source.cx, source.cy);
     POINT origin{};
     ClientToScreen(renderer, &origin);
@@ -493,6 +554,16 @@ void TestScaledMessagePoints(HWND renderer, HWND frame) {
 
         SetCapture(inputChild);
         Check(GetCapture() == inputChild, "native child can own capture without shim-owned capture state");
+        PostMessageW(renderer, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(-7, 90));
+        MSG marginDown{};
+        Check(GetMessageW(&marginDown, renderer, WM_LBUTTONDOWN, WM_LBUTTONDOWN) > 0 && marginDown.hwnd == renderer,
+              "new margin click while a child owns capture routes through fresh hit-test, not captured child");
+        const int beforeMarginMain = syntheticMouseMessages, beforeMarginChild = syntheticChildMouseMessages;
+        observeSyntheticMouse = true;
+        DispatchMessageW(&marginDown);
+        observeSyntheticMouse = false;
+        Check(syntheticMouseMessages == beforeMarginMain && syntheticChildMouseMessages == beforeMarginChild && GetCapture() == inputChild,
+              "new margin click activates no control and preserves the existing drag's capture for release");
         const POINT points[] = {{-7, 90}, {100, -9}, {area.right + 7, area.bottom + 9}, {100, 90}};
         const UINT messages[] = {WM_MOUSEMOVE, WM_LBUTTONUP, WM_RBUTTONUP, WM_MBUTTONUP, WM_XBUTTONUP};
         for (UINT message : messages) {
@@ -564,7 +635,7 @@ void ResizeScaledHost(HWND renderer, HWND frame, LONG width, LONG height, bool m
     GetClientRect(frame, &actual);
     Check(actual.left == 0 && actual.top == 0 && actual.right == width && actual.bottom == height,
           moveWindow ? "host client really becomes 400x300" : "host client really becomes 800x450");
-    Check(FixedScaledSource(renderer, frame), "real host resize preserves 1536x864 source at origin");
+    Check(FixedScaledSource(renderer, frame), "real host resize preserves configured source at origin");
     Check(resizes == 0 && nativeClientSizes == originalSizeMessages && nativeParentMessages == 0,
           "real host resize never calls native WM_SIZE/rebuild");
     if (actual.right == width && actual.bottom == height) TestScaledMouse(renderer, width, height);
@@ -644,7 +715,7 @@ void RunScaledWindowPath(HINSTANCE instance, bool unicode, const wchar_t* config
     Check((GetWindowLongW(lake, GWL_STYLE) & WS_CHILD) &&
           !(GetWindowLongW(lake, GWL_STYLE) & (WS_POPUP | WS_CAPTION)), "fixed renderer is a borderless child");
     Check(!(GetWindowLongW(lake, GWL_EXSTYLE) & WS_EX_TOPMOST), "scaled renderer is not topmost");
-    Check(FixedScaledSource(lake, frame), "render INI creates fixed 1536x864 client at origin");
+    Check(FixedScaledSource(lake, frame), "render INI creates configured fixed client at origin");
     RECT initialHost{};
     GetClientRect(frame, &initialHost);
     CheckScaledHostSizePolicy(frame, configuration);
@@ -658,7 +729,7 @@ void RunScaledWindowPath(HINSTANCE instance, bool unicode, const wchar_t* config
         return;
     }
     Check(initialHost.right >= 320 && initialHost.bottom >= 180 && initialHost.right <= 1024 && initialHost.bottom <= 576 &&
-          initialHost.right < 1536 && initialHost.bottom < 864, "host is born at fitting window size, smaller than source");
+          initialHost.right < fixtureSource.cx && initialHost.bottom < fixtureSource.cy, "host is born at fitting window size, smaller than source");
     const int initialSizeMessages = nativeClientSizes;
     SendMessageW(frame, WM_SIZE, SIZE_RESTORED, MAKELPARAM(800, 450));
     SendMessageW(frame, WM_SIZE, SIZE_MINIMIZED, 0);
@@ -673,6 +744,12 @@ void RunScaledWindowPath(HINSTANCE instance, bool unicode, const wchar_t* config
     vetoClose = true;
     SendMessageW(frame, WM_CLOSE, 0, 0);
     Check(closeRequests == earlyCloses && IsWindow(lake), "close before startup is deferred, not destructive during native modal");
+    const UINT failedMessage = RegisterWindowMessageW(L"LakeWindowedFix.StartupFailed.v1");
+    SendMessageW(lake, failedMessage, static_cast<WPARAM>(HRESULT_FROM_WIN32(ERROR_INVALID_DATA)), 0);
+    Check(failedMessage && closeRequests == earlyCloses && IsWindow(lake) &&
+          reinterpret_cast<ULONG_PTR>(GetPropW(frame, L"LakeWindowedFix.StartupFailure")) ==
+              static_cast<DWORD>(HRESULT_FROM_WIN32(ERROR_INVALID_DATA)),
+          "explicit startup failure is deferred through the UI until modals finish, without forced teardown");
     Check(PostMessageW(lake, 0x8032, 0, 0) != FALSE, "queue native startup notification");
     ShowWindow(lake, SW_SHOWNORMAL);
     Check(IsWindowVisible(frame) && IsWindowVisible(lake) && resizes == 0 && nativeClientSizes == initialSizeMessages,
@@ -704,6 +781,20 @@ void RunScaledWindowPath(HINSTANCE instance, bool unicode, const wchar_t* config
     ResizeScaledHost(lake, frame, 800, 450, false, initialSizeMessages);
     ResizeScaledHost(lake, frame, 400, 300, true, initialSizeMessages);
     TestScaledMessagePoints(lake, frame);
+
+    // Editing THIS fixture's own INI cannot change a live session's behavior.
+    // No operational configuration is touched, and values are restored below.
+    wchar_t oldWidth[32]{}, oldHeight[32]{};
+    GetPrivateProfileStringW(L"render", L"Width", L"", oldWidth, ARRAYSIZE(oldWidth), configuration);
+    GetPrivateProfileStringW(L"render", L"Height", L"", oldHeight, ARRAYSIZE(oldHeight), configuration);
+    Check(WritePrivateProfileStringW(L"render", L"Width", L"2048", configuration) &&
+          WritePrivateProfileStringW(L"render", L"Height", L"1024", configuration), "fixture edits only its private INI after session initialization");
+    Check(FixedScaledSource(lake, frame), "live INI edits cannot change the immutable canvas snapshot");
+    RECT liveArea{};
+    GetClientRect(frame, &liveArea);
+    TestScaledMouse(lake, liveArea.right, liveArea.bottom);
+    Check(WritePrivateProfileStringW(L"render", L"Width", *oldWidth ? oldWidth : nullptr, configuration) &&
+          WritePrivateProfileStringW(L"render", L"Height", *oldHeight ? oldHeight : nullptr, configuration), "fixture restores its own INI without reloading the running DLL");
 
     SendMessageW(frame, WM_ENTERSIZEMOVE, 0, 0);
     SendMessageW(frame, WM_SIZE, SIZE_RESTORED, MAKELPARAM(900, 650));
@@ -757,12 +848,14 @@ void RunScaledWindowPath(HINSTANCE instance, bool unicode, const wchar_t* config
 int RunScaledFixture(const wchar_t* configuration) {
     printf("Fixture ScaleRendering=1 NativeResize=0 (synthetic Win32 only; no pixel/GPU validation)\n");
     Check(sizeof(void*) == 4, "x86 scaled fixture");
-    Check(GetPrivateProfileIntW(L"render", L"Width", 0, configuration) == 1536 &&
-          GetPrivateProfileIntW(L"render", L"Height", 0, configuration) == 864, "scaled suite has independent render configuration");
+    fixtureSource = {static_cast<LONG>(GetPrivateProfileIntW(L"render", L"Width", 1088, configuration)),
+                     static_cast<LONG>(GetPrivateProfileIntW(L"render", L"Height", 612, configuration))};
+    Check(fixtureSource.cx >= 1024 && fixtureSource.cy >= 600, "scaled suite exercises admitted configured canvas");
     TestScaledWindowSizePolicy();
     const bool policyOnly = GetPrivateProfileIntW(L"fixture", L"WindowPolicyOnly", 0, configuration) == 1;
     HMODULE fontModule = LoadLibraryW(L"Contour.dll");
     Check(fontModule != nullptr, "load synthetic renderer for module-scoped font hook");
+    CheckContourSessionIdentity(fontModule);
     if (fontModule) {
         FARPROC address = GetProcAddress(fontModule, "FixtureCreateFont");
         if (!address) address = GetProcAddress(fontModule, "_FixtureCreateFont");
@@ -835,6 +928,7 @@ int RunScaledFixture(const wchar_t* configuration) {
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    struct FlushBeforeFixtureReturn { ~FlushBeforeFixtureReturn() { FlushFixtureDiagnostics(); } } flushBeforeReturn;
     for (int i = 1; i + 1 < argc; ++i) {
         if (wcscmp(argv[i], L"--exit-code") == 0) {
             // Intentional ordinary exit, not a crash or foreign-process kill.
@@ -1040,6 +1134,7 @@ int wmain(int argc, wchar_t** argv) {
     Check(lastPumpedQuit == 0, "UI host posts quit zero after consumed quit 23 and unrelated worker quit 99");
     HMODULE renderer = LoadLibraryW(L"Contour.dll");
     Check(renderer != nullptr, "late synthetic Contour.dll loads");
+    CheckContourSessionIdentity(renderer);
     if (renderer) {
         // C export decoration differs across MSVC/MinGW; these are test-only.
         FARPROC factory = GetProcAddress(renderer, "FixtureCreateWindow");

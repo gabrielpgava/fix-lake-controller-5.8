@@ -1,3 +1,4 @@
 LIBRARY LakeWindowedFix
 EXPORTS
     LakeWindowedInitialize=_LakeWindowedInitialize@4
+    LakeWindowedQueryContract=_LakeWindowedQueryContract@4
