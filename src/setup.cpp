@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include "setup_engine.h"
 #include "installer_payload.h"
+#include "product_version.h"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <algorithm>
@@ -208,7 +209,7 @@ int FinishRemoval(unsigned long long pid, unsigned long long creation, const wch
     return result.ok ? 0 : static_cast<int>(result.error ? result.error : ERROR_INSTALL_FAILURE);
 }
 
-enum class Mode { Install, Remove, Check };
+enum class Mode { Install, Remove, Check, Upgrade, Rollback };
 struct Dialog {
     Mode mode = Mode::Install;
     setup::Locations locations;
@@ -227,7 +228,15 @@ void UpdateDescription(Dialog& state) {
     std::wstring text;
     if (state.mode == Mode::Remove) {
         text = L"Remover o modo janela deste usuario?\r\n\r\nO Lake original e seus presets nao serao removidos.\r\n"
-               L"Configuracao INI editada e arquivos desconhecidos serao preservados.\r\n\r\n" + state.locations.installDirectory;
+               L"INI editado, logs e arquivos/atalhos alterados serao preservados.\r\n"
+               L"Recibo e marcador ficam para recuperar/reinstalar com seguranca.\r\n\r\n" + state.locations.installDirectory;
+    } else if (state.mode == Mode::Rollback) {
+        text = L"Restaurar a versao anterior?\r\n\r\nUse esta opcao pelo setup externo, com o Lake fechado.\r\n"
+               L"INI atual, logs e arquivos pessoais serao mantidos.\r\n\r\n" + state.locations.installDirectory;
+    } else if (state.mode == Mode::Upgrade) {
+        text = L"Atualizar para a versao " + std::wstring(setup::kVersion) + L"?\r\n\r\n"
+               L"O setup prepara e verifica todos os arquivos antes de substituir a versao ativa.\r\n"
+               L"Mantenha o Lake fechado ate concluir. Use --rollback para reverter uma troca interrompida.\r\n\r\n" + state.locations.installDirectory;
     } else if (state.app.empty()) {
         text = L"Lake Controller 5.8 Build 007 compativel nao encontrado.\r\n\r\n"
                L"Instale o programa original ou clique em Localizar Lake.\r\n"
@@ -235,8 +244,9 @@ void UpdateDescription(Dialog& state) {
     } else {
         text = L"Lake compativel encontrado:\r\n" + state.app +
             L"\r\n\r\nInstalacao para este usuario, com atalhos na area de trabalho e no menu Iniciar.\r\n"
-            L"Sem comandos, configuracao manual ou alteracao dos arquivos originais.\r\n\r\n"
-            L"Versao 0.6 experimental: teste primeiro OFFLINE e fora de producao.";
+            L"Instalar tambem recupera ausencias de uma instalacao compativel.\r\n"
+            L"Para atualizar use o setup externo com --upgrade; para reverter, --rollback.\r\n\r\n"
+            L"Versao " + std::wstring(setup::kVersion) + L" experimental: teste OFFLINE, fora de producao.";
     }
     if (state.mode == Mode::Check) text += L"\r\n\r\nVerificacao somente-leitura: nada sera instalado.";
     SetWindowTextW(state.status, text.c_str());
@@ -269,7 +279,8 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         if (state->mode == Mode::Install)
             state->locate = control(L"BUTTON", L"Localizar Lake...", WS_TABSTOP | BS_PUSHBUTTON, 20, 225, 145, 32, kLocate);
         state->action = control(L"BUTTON", state->mode == Mode::Remove ? L"Remover" :
-            state->mode == Mode::Check ? L"Fechar" : L"Instalar", WS_TABSTOP | BS_DEFPUSHBUTTON, 310, 225, 110, 32, IDOK);
+            state->mode == Mode::Check ? L"Fechar" : state->mode == Mode::Upgrade ? L"Atualizar" :
+            state->mode == Mode::Rollback ? L"Reverter" : L"Instalar / Reparar", WS_TABSTOP | BS_DEFPUSHBUTTON, 285, 225, 135, 32, IDOK);
         state->cancel = control(L"BUTTON", L"Cancelar", WS_TABSTOP | BS_PUSHBUTTON, 430, 225, 110, 32, IDCANCEL);
         UpdateDescription(*state);
         SetFocus(state->action);
@@ -305,6 +316,11 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
                 result.error = GetLastError();
             } else if (state->mode == Mode::Remove) {
                 result = setup::Uninstall(state->locations, setup::kPayloadFiles, ARRAYSIZE(setup::kPayloadFiles));
+            } else if (state->mode == Mode::Rollback) {
+                result = setup::Rollback(state->locations);
+            } else if (state->mode == Mode::Upgrade) {
+                result = setup::Upgrade(state->locations, state->app, setup::kPayloadFiles,
+                                        ARRAYSIZE(setup::kPayloadFiles), ModulePath(), setup::LakeBuild());
             } else {
                 result = setup::Install(state->locations, state->app, setup::kPayloadFiles,
                                         ARRAYSIZE(setup::kPayloadFiles), ModulePath(), setup::LakeBuild());
@@ -312,7 +328,8 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
             state->done = result.ok;
             state->exitCode = result.ok ? 0 : static_cast<int>(result.error ? result.error : ERROR_INSTALL_FAILURE);
             SetWindowTextW(state->status, result.message.c_str());
-            SetWindowTextW(state->action, result.ok ? L"Concluir" : state->mode == Mode::Remove ? L"Remover" : L"Instalar");
+            SetWindowTextW(state->action, result.ok ? L"Concluir" : state->mode == Mode::Remove ? L"Remover" :
+                state->mode == Mode::Upgrade ? L"Atualizar" : state->mode == Mode::Rollback ? L"Reverter" : L"Instalar / Reparar");
             SetWindowTextW(state->cancel, L"Fechar");
             EnableWindow(state->action, TRUE);
             EnableWindow(state->cancel, TRUE);
@@ -334,7 +351,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         };
         position(state->status, 20, 18, 520, 192);
         position(state->locate, 20, 225, 145, 32);
-        position(state->action, 310, 225, 110, 32);
+        position(state->action, 285, 225, 135, 32);
         position(state->cancel, 430, 225, 110, 32);
         if (old) DeleteObject(old);
         const auto* suggested = reinterpret_cast<const RECT*>(lparam);
@@ -351,10 +368,21 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
-    InitializeDpi();
     int count = 0;
     wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &count);
     if (!arguments) return ERROR_INVALID_PARAMETER;
+    // Build gate: no DPI/COM/known folders/process inventory/GUI/installation.
+    if (count == 2 && wcscmp(arguments[1], L"--verify-payload") == 0) {
+        LocalFree(arguments);
+        const setup::Result result = setup::VerifyPayload(setup::kPayloadFiles, ARRAYSIZE(setup::kPayloadFiles));
+        // Retain this setup link's exact identity in runtime data, independently
+        // of the embedded runtime payload's different BuildId. No GUI or install.
+        constexpr char buildId[] = LAKE_FIX_BUILD_ID;
+        DWORD written = 0;
+        WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), buildId, sizeof(buildId) - 1, &written, nullptr);
+        return result.ok ? 0 : static_cast<int>(result.error ? result.error : ERROR_INVALID_DATA);
+    }
+    InitializeDpi();
     Dialog state;
     state.locations = setup::DefaultLocations();
     if (state.locations.installDirectory.empty()) { LocalFree(arguments); return ERROR_PATH_NOT_FOUND; }
@@ -366,10 +394,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return valid ? FinishRemoval(pid, creation, token.c_str(), state.locations) : ERROR_INVALID_PARAMETER;
     }
     if (count == 2 && wcscmp(arguments[1], L"--uninstall") == 0) state.mode = Mode::Remove;
+    else if (count == 2 && wcscmp(arguments[1], L"--upgrade") == 0) state.mode = Mode::Upgrade;
+    else if (count == 2 && wcscmp(arguments[1], L"--rollback") == 0) state.mode = Mode::Rollback;
     else if (count == 2 && wcscmp(arguments[1], L"--check") == 0) state.mode = Mode::Check;
     else if (count != 1) { LocalFree(arguments); return ERROR_INVALID_PARAMETER; }
     LocalFree(arguments);
-    if (state.mode != Mode::Remove) state.app = FindApplication();
+    if (state.mode == Mode::Install || state.mode == Mode::Check) state.app = FindApplication();
     WNDCLASSEXW type{};
     type.cbSize = sizeof(type);
     type.lpfnWndProc = WindowProcedure;
