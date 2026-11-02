@@ -5,6 +5,123 @@ Baseline e matriz requisito/implementação/teste/pendência:
 [IMPLEMENTATION.md](IMPLEMENTATION.md). Nenhuma execução abaixo iniciou o Lake,
 operou áudio/equipamentos ou alterou instalação operacional.
 
+## Candidato final de fontes limpas
+
+Snapshot compilado: **`28fe4e3057604d7428987d7a2b0692e20cb0619b`**,
+`SourceDirty=false`, fingerprint
+`5cec08f20c98822580faf4133b88a72953f2d7614093f74a0ca448e400be2b5f`.
+Runtime, profiling, setup e GraphicsCheck têm exatamente esse snapshot. Fontes
+ficaram congeladas durante todos esses builds/testes/payload/pacote. Este relato
+posterior é somente documentação: **não muda a identidade dos binários para o
+HEAD posterior**. Não há alegação de reprodução bit a bit em outra máquina.
+
+| Artefato / evidência final | BuildId | Resultado |
+| --- | --- | --- |
+| `dist-final-zig` | `b0fb95b656db4a5197c9d37645940f7a` | **18/18 suítes**, zero falhas |
+| `dist-final-profile` | `22e12ded4b314b45a42d53e4628942e3` | **18/18 suítes**, zero falhas; executado depois do normal, separado do pacote |
+| `dist-final-setup` | `73dc64699f32432aa18961bd4be523bd` | **2/2 suítes**, zero falhas; **421 checks**, 1 skip opcional symlink/1314 (não PASS); payload final exit 0 |
+| `build-final-graphics` | `53724b49a6c84c8b86f4c51303a7db5f` | Seis self-tests CPU; gate sem confirmações retorna **2/NOT_EXECUTED**, sem iniciar o EXE gráfico |
+| CMake `LAKE_BUILD_SETUP=ON`, runtime previamente testado acima | Manual, não pacote | **18/18 CTest**, zero falhas, **282,38 s**; sandbox 259,27 s; payload exit 0; ABI aponta à DLL final stripped |
+
+O setup liga o payload ao runtime `b0fb95b656db4a5197c9d37645940f7a` e ao manifesto
+SHA-256 `32d1c7aeb180de8c7dd3e986bfe08200686c5c4618573ac69b0a5fe545b66b1f`.
+Todos os testes exigidos retornaram exit 0. A correção da barreira acrescentou
+três checks por execução Win32 comum/escalada; os checks dos módulos nativos
+(129/104/211/97/158/84/22/7/154) permanecem os descritos na tabela da integração.
+
+Testes adicionais **reexecutados nos artefatos finais**: **38** cenários splitter,
+**24** recibos/PDB runtime, **12** setup, **12** GraphicsCheck; provenance **30** e
+guards mock **27**, todos sem falhas. PDBs correspondem por GUID/age ao CodeView
+dos mesmos links otimizados; não foram recriados em Debug. Stderr dos quatro
+scripts de build vazio; nenhum warning/erro de compilação encontrado. O aviso
+CMake de identificação ASM do wrapper é separado de erro de compilação.
+
+Código/layout executável da DLL e launcher tem o mesmo digest que no primeiro
+candidato limpo de `2f7a1d4`: a correção foi no harness, não no runtime. Os módulos
+`profile.*`, `ui_quality.h` e seus testes continuam sem diferença contra `ed8756b`.
+
+### Arquivos locais e hashes finais
+
+Pacote: **`out/candidates/v0.7.0/`**, experimental **DevelopmentUnsigned**.
+O ZIP contém exatamente seis arquivos MIT, byte a byte iguais aos do payload e
+runtime testado. Promoção real por diretório terminou `Committed`; o candidato
+anterior de `2f7a1d4` permanece no backup verificado, sem sobrescrita parcial.
+
+| Arquivo | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `LakeWindowedFix-v0.7.0-win32.zip` | 452911 | `27bd1d93640928c633a93287c8638f42636cebd27620f3df80b3ff34f35519b7` |
+| `LakeWindowedFix-Setup-v0.7.0.exe` | 1667584 | `5739235eddb6b0f1e884c54110a1324fc3130d9cff804fe3407d24f66d75c7e9` |
+| `SHA256SUMS.txt` | 200 | `1165708decb8b8c47ee59c31a1347825fa3326d49ba729f452da5e3b451258c5` |
+| `RELEASE-MANIFEST.json` | — | `669192ffc03981064aac89ec80fd8c2f1003910e9950e6ecbbc1995acb3b67bc` |
+
+Runtime stripped: DLL **503808** bytes, SHA-256
+`c602a026702c02d8f5dc53e56ae84cea5a88c715dd4ab08dcc3ba4467160c3c9`;
+launcher **449024** bytes, SHA-256
+`d1fea231c6ec95ddac718fa93a6cc56eb774f6ae534605f4c7b05f5903005551`.
+Imagens originais, DWARF, PDBs e recibos ficam somente em
+`build-final-*/symbols/<BuildId>/`, fora do pacote do operador.
+
+### Comandos da rodada final
+
+PowerShell na raiz; sem download por esses scripts:
+
+```powershell
+$env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp\opencode'
+$env:TMP = $env:TEMP
+$zig = '.\build-tools\python\ziglang\zig.exe'
+.\scripts\Build.ps1 -Toolchain Zig -ZigPath $zig -BuildDirectory build-final-zig -OutputDirectory dist-final-zig
+.\scripts\Build.ps1 -Toolchain Zig -ZigPath $zig -BuildDirectory build-final-profile -OutputDirectory dist-final-profile -EnableProfiling
+.\scripts\Build-Installer.ps1 -Toolchain Zig -ZigPath $zig -RuntimeDirectory dist-final-zig -BuildDirectory build-final-setup -OutputDirectory dist-final-setup -AllowUnsignedDevelopment
+.\scripts\Build-GraphicsCheck.ps1 -ZigPath $zig -BuildDirectory build-final-graphics
+.\scripts\New-ReleasePackage.ps1 -RuntimeDirectory dist-final-zig -InstallerDirectory dist-final-setup -OutputDirectory out/candidates/v0.7.0 -AllowUnsignedDevelopment
+.\scripts\Test-Candidate.ps1 -PackageDirectory out/candidates/v0.7.0 -AllowUnsignedDevelopment
+.\tests\Provenance.Test.ps1
+.\tests\Release-Package.Test.ps1 -PackageDirectory out/candidates/v0.7.0
+.\tests\Symbols.Test.ps1 -InputDirectory build-final-zig -BuildId b0fb95b656db4a5197c9d37645940f7a
+.\tests\Link-Symbols.Test.ps1 -SymbolDirectory build-final-zig/symbols/b0fb95b656db4a5197c9d37645940f7a -BinaryDirectory dist-final-zig -BuildId b0fb95b656db4a5197c9d37645940f7a
+```
+
+`Link-Symbols.Test.ps1` também foi executado para setup e GraphicsCheck com seus
+IDs/diretórios da tabela. Toolchain: Zig **0.14.1**, SHA-256 do driver
+`1ddf230367e07738c4a769eae66c1db7469e37bd520e81c86356453d0db2b9fd`;
+LLVM objcopy **23.1.4** conforme [SYMBOLS.md](SYMBOLS.md). Cada chamada real do
+compilador/argv e seus hashes está no manifesto local; **nenhum argv vazio** foi
+atestado na rodada final. Não foram reutilizados logs de testes anteriores.
+
+CMake portátil **3.31.10**, Ninja **1.13.2**, toolchain Zig x86 local já descrita
+na rodada inicial. Reconfigurado com `LAKE_BUILD_SETUP=ON`,
+`LAKE_RUNTIME_DIRECTORY=<repo>/dist-final-zig`,
+`LAKE_BUILD_STAMP_HEADER=<repo>/build-final-zig/generated/lake_build_stamp.h`,
+`LAKE_TEST_PRODUCTION_DLL=<repo>/dist-final-zig/LakeWindowedFix.dll`; build com
+`--parallel 2`, CTest com `--output-on-failure --no-tests=error --parallel 1`.
+O setup CMake manual usa esse stamp só para testes; não é o EXE empacotado.
+
+Logs/recibos locais: `build-final-*.log`,
+`build-final-*/.build-evidence/<BuildId>/*.txt`, `build-cmake-final-*.log`,
+`BUILD-PROVENANCE.json` nos diretórios finais e stores de símbolos. Todos ignorados
+pelo Git; somente este resumo revisado é versionado.
+
+`Publish-Release.ps1 -DryRun -AllowUnsignedDevelopment` foi **recusado**, como
+esperado: o snapshot não é `origin/main` (`ed8756b`). Candidate check aprovado não
+é autorização para merge/tag/release. Nenhuma dessas operações foi feita.
+
+### Commits da implementação
+
+| Commit | Etapa |
+| --- | --- |
+| `0abfc4a` | Baseline isolada e matriz inicial |
+| `e379fba` | Captura contínua independente por eixo |
+| `04ddea7` | Inspector host/canvas e monitor limitado |
+| `0300fd1` | Presenter/COM/admissão/Restore/cache |
+| `c3d4bff` | Setup, recibos, reparo, upgrade/rollback |
+| `54383fd` | Startup/ABI/identidade, logger/config, builds/payload/proveniência/símbolos e diagnóstico próprio |
+| `2f7a1d4` | CI x86, wrappers e documentação/escopo |
+| `28fe4e3` | Barreira try-only do harness, snapshot do candidato final |
+
+O commit posterior deste relato não recompila nem carimba esses artefatos. As
+pendências de engenharia e testes externos continuam explícitas em
+[IMPLEMENTATION.md](IMPLEMENTATION.md); CI remoto/MSVC não são presumidos aprovados.
+
 ## Integração local executada antes dos commits finais
 
 Windows 11 x64, executáveis/testes **x86 Release**, Zig **0.14.1**, C++17 `-O2 -g`,

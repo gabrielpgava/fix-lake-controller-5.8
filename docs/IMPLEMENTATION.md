@@ -53,6 +53,12 @@ nunca homologação do Lake/GPU/áudio. Builds, IDs e commits exatos:
 [VALIDATION-07.md](VALIDATION-07.md). As contagens são as rodadas integradas desta
 revisão, não as contagens históricas do README.
 
+Fechamento local: snapshot limpo **`28fe4e3`**, runtime normal/profiling **18/18**
+suítes cada; setup **421 checks**, zero falhas, um skip opcional; CMake setup ON
+**18/18**. Pacote verificado em `out/candidates/v0.7.0/`. IDs, hashes, comandos,
+falha do harness detectada/corrigida e preflight de publicação recusado:
+[candidato final](VALIDATION-07.md#candidato-final-de-fontes-limpas).
+
 | Requisito / classificação | Implementação | Teste e evidência executada | Pendência / limite |
 | --- | --- | --- | --- |
 | 1. Baseline/comparação — concluído | Worktree isolado de `ed8756b`, comparação com `5e9c4f9`; snapshots/profiling existentes mantidos | Baseline runtime e setup acima; regressões negativas de input/presenter/lookup | Nenhuma comparação de FPS Lake foi feita |
