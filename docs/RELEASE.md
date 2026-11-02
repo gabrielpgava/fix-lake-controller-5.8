@@ -1,69 +1,58 @@
-# Build e release com Make
+# Build e candidato com Make — 0.7.0
 
-Estes comandos sao para **desenvolvedores**. O operador baixa o instalador e usa **duplo clique > Instalar > atalho**; nao precisa de Make, compilador, GitHub CLI ou PowerShell.
+Comandos para desenvolvedores. O operador usa o setup, sem Make/PowerShell/compilador.
+A candidata é experimental, **não assinada e sem ensaio Lake OFFLINE desta revisão**.
 
-## Pre-requisitos no Windows
+## Pré-requisitos Windows
 
-- GNU Make (`make.exe`), Git e Windows PowerShell 5.1 ou superior.
-- Zig **0.14.1 completo**, existente no PATH ou nas pastas locais `build-tools/zig-0.14.1/zig-x86_64-windows-0.14.1/` ou `build-tools/python/ziglang/`. Nada e baixado automaticamente; copias incompletas sao recusadas. Para outro caminho, use `ZIG=C:/tools/zig/zig.exe`.
-- Somente para publicar: GitHub CLI (`gh.exe`) autenticado, com permissoes de push e criacao de releases no repositorio `origin`. Nao grave tokens no Makefile, no INI ou no Git.
+- Git, GNU Make, PowerShell 5.1, Python 3 para os snapshots.
+- Zig **0.14.1 completo**, local; `ZIG=C:/tools/zig/zig.exe` seleciona o executável.
+- LLVM objcopy local para símbolos próprios:
+  `OBJCOPY=C:/tools/LLVM/bin/llvm-objcopy.exe`, ou descoberta descrita em
+  [SYMBOLS.md](SYMBOLS.md). Não substitui o compilador; builds não baixam ferramentas.
+- MSVC x86/CMake/SDK são alternativa via scripts, não uma execução local já comprovada.
 
-## Comandos
+## Fluxo local (não publica)
 
 ```powershell
-make help
-make build
-make test
-make profile
-make installer
-make package
+make build          # runtime x86 Release e 18 suítes
+make profile        # runtime diagnóstico separado, nunca payload de setup
+make installer      # runtime testado + setup fase dois, sandbox e payload
+make package        # lista fechada de assets e guards mock
+make release-check  # candidato permitido na branch de trabalho
 ```
 
-- `build` compila o runtime x86 e executa as suites de regressao, incluindo profiling habilitado/desabilitado; `test` e um alias para esse build testado. As oito suites/1.159 verificacoes documentadas anteriormente pertencem a baseline historica.
-- `profile` compila/testa somente um runtime de diagnostico separado em `dist-profile-v0.6.0/`, com intermediarios em `build-zig-profile/`. Nao inicia o Lake, instala ou publica nada. O fluxo normal build/package deixa profiling desligado. Veja [OPTIMIZATION.md](OPTIMIZATION.md).
-- `installer` tambem compila e testa o instalador nativo em pastas sinteticas, sem instalar no perfil real.
-- `package` tambem gera os arquivos de distribuicao por uma lista fechada de nomes. Nunca inclui a pasta inteira de build/dist, logs, dumps, presets, ferramentas, evidencias privadas ou binarios proprietarios.
-- Depois do empacotamento, executa **17 testes das guardas de publicacao**, com Git e GitHub simulados: nenhuma tag, release ou chamada remota real e feita pelos testes. Incluem arvore suja, hashes/checksums/ZIP alterados, metadados privados inesperados, URLs divergentes e tags conflitantes.
+Saídas padrão: `dist-release-v0.7.0/`, `dist-setup-v0.7.0/`,
+`dist-profile-v0.7.0/`, `out/releases/v0.7.0/`.
+`VERSION` vem de `src/product_version.h`; qualquer override deve coincidir.
+`-SkipTests`, Debug e profiling não geram candidato distribuível.
 
-Saidas separadas das distribuicoes historicas:
+O pacote tem exatamente quatro assets:
 
-```text
-dist-release-v0.6.0/     runtime
-dist-setup-v0.6.0/       instalador
-out/releases/v0.6.0/    assets publicaveis
-```
-
-Os assets sao:
-
-1. `LakeWindowedFix-Setup-v0.6.0.exe` — opcao simples para o operador.
-2. `LakeWindowedFix-v0.6.0-win32.zip` — seis arquivos MIT, alternativa portatil.
+1. `LakeWindowedFix-Setup-v0.7.0.exe`.
+2. `LakeWindowedFix-v0.7.0-win32.zip` — exatamente seis arquivos próprios MIT.
 3. `SHA256SUMS.txt`.
-4. `RELEASE-MANIFEST.json` — versao, commit de origem, estado limpo/sujo e hashes dos assets.
+4. `RELEASE-MANIFEST.json` — schema 2, proveniência dos builds/testes/payload.
 
-Pacotes de desenvolvimento podem ser gerados com alteracoes locais, mas ficam marcados como `SourceDirty=true` e **nao podem ser publicados** pelo script.
+Scripts do setup/package/candidate exigem `-AllowUnsignedDevelopment` explícito;
+os alvos Make de desenvolvimento o selecionam. Não alegam assinatura nem modificam
+políticas do Windows. Fontes sujas são identificadas, nunca relabeladas com HEAD
+posterior. Símbolos/PDBs, fixtures, Contour, logs e ferramentas não entram nos assets.
 
-## Publicar no GitHub
+O candidato é promovido por diretório com journal/backup; conflitos desconhecidos
+são preservados. Não apague locks/diretórios recursivamente para forçar uma promoção.
+Procedimento de recuperação: [BUILD-PROVENANCE.md](BUILD-PROVENANCE.md).
 
-Depois de revisar, testar, commitar e enviar o codigo:
+## Publicação é outra operação
 
-```powershell
-git push origin main
-make release-check VERSION=0.6.0
-make release VERSION=0.6.0
-```
+`make publish-check` executa o preflight read-only separado. Exige fontes/pacote
+limpos e `package.SourceCommit == HEAD == origin/main`, além de URLs/tags/hashes.
+**Não faça merge nem envie main apenas para aprovar um candidato de trabalho.**
 
-`release-check` recompila/testa/empacota e verifica o commit, os hashes, o ZIP e o remoto **sem criar tag ou release**. Nao precisa de GitHub CLI.
+`make release` / `make release-draft` são operações remotas explícitas, não parte
+desta entrega e não autorizadas por um candidate check. Exigem GitHub CLI autenticado
+e revisão independente. Não há force-push, substituição de tag/release/assets,
+credenciais de assinatura ou job de publicação no workflow. Futura assinatura
+verdadeira depende do pipeline/certificado ainda pendentes.
 
-`release` exige fontes limpas, pacote do mesmo commit e `origin/main` nesse commit. Cria a tag anotada `v0.6.0` se ainda nao existir, envia apenas essa tag e cria um **prerelease experimental**, sem marca-lo como latest. Requer GitHub CLI autenticado; `GH=C:/caminho/gh.exe` seleciona outro caminho.
-
-Para criar um rascunho revisavel em vez de publicar imediatamente:
-
-```powershell
-make release-draft VERSION=0.6.0
-```
-
-Nao ha force-push, substituicao de tags ou sobrescrita de release/assets existentes. Se um passo de rede falhar, confira o estado no GitHub antes de repetir; uma tag ja criada e aceita somente se apontar para o mesmo commit.
-
-O preflight verifica a URL de fetch e todas as URLs efetivas de push do `origin`; GitHub CLI fica explicitamente vinculado a `github.com`, sem seguir outro `GH_HOST`. Manifesto, assets e ZIP sao verificados antes de publicar. O quarto asset (manifesto) tambem deve ser um arquivo regular, sem link/reparse.
-
-`VERSION` deve corresponder a versao do projeto em `CMakeLists.txt`. A 0.6 permanece experimental: simplificar a entrega nao equivale a homologar hardware, audio ou uso em campo. Leia [SETUP.md](SETUP.md) e [PERFORMANCE.md](PERFORMANCE.md).
+Resultados reais e limites: [VALIDATION-07.md](VALIDATION-07.md).

@@ -1,5 +1,9 @@
 # Diagnóstico
 
+> Histórico até 0.6. Diagnóstico atual: [DIAGNOSTICS.md](DIAGNOSTICS.md),
+> [STARTUP-RELIABILITY.md](STARTUP-RELIABILITY.md) e [OBSERVATION.md](OBSERVATION.md).
+> Captura externa já não usa sentinela; logs do runtime já não escrevem no renderer/VEH.
+
 ## 0.6: mínimo configurável e recursos
 
 A candidata 0.6 usa `dist-v0.6\` e acrescenta `[window] MinWidth=800` / `MinHeight=450` no modo escalado. São mínimos em pixels lógicos; `320/180` restaura o limite pequeno anterior. A 125% DPI, o padrão resultou em cliente mínimo 1000×562 físico. O Windows também pode limitar pedidos programáticos menores; não confunda pedido e tamanho efetivamente observado. Não altera o canvas nem pede rebuild do renderer. INIs existentes são preservados pelo build e não são migrados automaticamente. O monitor PowerShell somente-leitura, resultados e protocolo de comparação estão em [PERFORMANCE.md](PERFORMANCE.md); crescimento curto não confirma vazamento ou sua origem.

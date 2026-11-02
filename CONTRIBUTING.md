@@ -9,3 +9,10 @@
 7. Relatórios privados devem ficar em `private/`, `evidence/` ou `dumps/`, ignorados pelo Git. Revise `git status` e `git diff --cached` antes de publicar.
 
 Abra issues com passos reprodutíveis e logs mínimos sem presets privados, endereços de dispositivos ou credenciais. Nenhum acesso a hardware/áudio é necessário para contribuir com a fixture Win32.
+
+Na 0.7, launcher e DLL de teste têm flavor `-fixture`, compilados separadamente;
+não instale a DLL `LakeWindowedFix.Test.dll` nem crie bypass de hashes em produção.
+O build registra seu snapshot antes da compilação e liga testes aos hashes finais.
+Não altere fontes durante esse build nem reutilize logs de uma revisão anterior.
+Fixtures, GPU própria e Lake real são camadas distintas. Veja
+[a matriz](docs/IMPLEMENTATION.md) e [a proveniência](docs/BUILD-PROVENANCE.md).

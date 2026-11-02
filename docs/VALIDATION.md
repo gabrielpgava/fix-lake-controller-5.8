@@ -1,5 +1,8 @@
 # Validação e limites
 
+> Histórico até 0.6. Resultados da revisão atual: [VALIDATION-07.md](VALIDATION-07.md).
+> Os números abaixo não aprovam a candidata 0.7.
+
 ## Revisão 0.6 experimental
 
 Otimizações locais de input/apresentação, mínimo configurável e monitor somente-leitura estão descritos em [PERFORMANCE.md](PERFORMANCE.md), junto dos resultados atuais. A candidata usa `dist-v0.6/`, preservando versões anteriores. **1.159 verificações passaram, zero falhas, oito suítes Zig x86**; o ensaio OFFLINE confirmou mínimo padrão/opt-out, Home/Modules, resize, margens e foco, além de 300 amostras de recursos em cinco minutos. Execuções novas mantiveram a seta nativa em 240/240 amostras após resize/foco; um estado anterior oculto conservou o fallback bitmap, sem causa determinada. Os números históricos abaixo não são validação da 0.6.

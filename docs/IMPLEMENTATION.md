@@ -46,30 +46,37 @@ Logs locais `build-baseline-setup-tests.stdout.log` / `.stderr.log`.
 4. **Lake real OFFLINE:** não executado nesta revisão. Requer instalação legítima
    admitida, isolamento e ausência de operação de áudio. OFFLINE não isola a rede.
 
-## Matriz de execução (atualizada por etapa validada)
+## Matriz requisito → implementação → teste → evidência → pendência
 
-| Requisito / classificação inicial | Arquivos | Implementação / verificação prevista | Evidência atual / pendência |
+**Implementado** abaixo significa código integrado e evidência no nível indicado,
+nunca homologação do Lake/GPU/áudio. Builds, IDs e commits exatos:
+[VALIDATION-07.md](VALIDATION-07.md). As contagens são as rodadas integradas desta
+revisão, não as contagens históricas do README.
+
+| Requisito / classificação | Implementação | Teste e evidência executada | Pendência / limite |
 | --- | --- | --- | --- |
-| 1. Baseline e comparação | este documento, build/testes | Snapshot isolado, comandos reais, preservar HEAD | Baseline executada acima |
-| 2. Falhas de proxy/layout: risco estático de escala parcial | `fix.cpp`, `ddraw_scale.*`, testes | Fail-closed de criação, estágio explícito, regressões de falha | Em implementação; Lake pendente |
-| 2. Erros e corrida launcher: defeitos demonstráveis | `launcher.cpp`, políticas/testes novos | Early exit/erro/timeout distintos, snapshot limitado, mutex, handshake/identidade | Em implementação |
-| 3. Captura externa perde ambos eixos: defeito lógico | `scale_geometry.h`, `fix.cpp`, fixture | Hit-test separado de extrapolação capturada por eixo | Regressão na baseline e testes corrigidos executados; [INPUT-RELIABILITY.md](INPUT-RELIABILITY.md); Lake pendente |
-| 3. Deltas pequenos: matemática, sem semântica real comprovada | geometria/diagnóstico | Instrumentação restrita; acumulação comportamental desativada | Investigação proprietária pendente |
-| 4. Restore não invalida letterbox: risco estático reproduzível COM | `ddraw_scale.cpp`, presenter test | Invalidar após sucesso, preservar HRESULT/reentrância | Em implementação |
-| 4. Critério de frame amplo/publicação prematura: defeito lógico | presenter/provider, testes | Admitir papel/dimensões/destino; publicar somente após sucesso | Em implementação |
-| 5. Supressão global/log síncrono: defeito de diagnóstico/risco | presenter, logger, testes | Limites por operação, fila fixa, perdas, consumo fora do renderer/VEH | Em implementação |
-| 5. Inspeção omite host: defeito demonstrado no script | `Inspect-WindowState.py`, snapshots | Papel host/canvas e propriedade apenas no host, sem textos privados | 4 testes Python executados; [OBSERVATION.md](OBSERVATION.md) |
-| 6. Estatísticas/sessão longa: melhoria de produto | DLL, monitor, testes | Monitor até 24h com limite de linhas; stats DLL em implementação | 22+9 testes métricas/política/falhas executados; ensaio longo pendente |
-| 7. Reinstalação/remoção parcial: defeitos de lifecycle | setup engine/testes | Dados preservados reconhecíveis, ausência idempotente, recuperação | Em implementação independente |
-| 7. Upgrade/rollback transacional: melhoria de produto | setup engine | Staging, identidade anterior, configuração preservada | Não alegar suporte sem testes |
-| 8. Proveniência tardia/promoção parcial: defeitos de distribuição | scripts, testes, build | Build manifest, ligação dos testes, candidate check separado, rollback | Em implementação independente |
-| 8. Assinatura/símbolos: melhoria de distribuição | scripts/build/CI | Ordem final e candidato não assinado, símbolos próprios | Certificado ausente; distribuição pendente |
-| 9. Diagnóstico DirectDraw independente: melhoria de teste | aplicação própria, build | DD7 real, padrões próprios, geometria/pixels/estado | Pendente desktop/GPU específico |
-| 10. Configuração/UI/posição: melhoria de produto | config, DLL/setup, testes | Sessão imutável, schema/origem, UI simples, posição recuperável | Pendente; sem mudança ampla de DPI |
-| 10. Cursor híbrido: hipótese proprietária | UI policy/docs | Preservar fallback e opções atuais | Sem evidência: híbrido desativado |
-| 11. Falhas/símbolos: melhoria de diagnóstico | DLL/launcher/build | Build/etapa/códigos; sem minidump em VEH | Coletor externo opcional pendente |
-| 12. CI x86 e desempenho | workflows/docs | Zig fixado/MSVC, setup/mocks, sem Lake em CI | Pendente; sem alegação de FPS/leak |
-| 12. Ensaio 15–30 min/2–4 h e matriz Lake | `VALIDATION.md`, `PERFORMANCE.md` | Mesmo cenário/configuração, recursos e tendências | Não executado; ambiente isolado não estabelecido |
+| 1. Baseline/comparação — concluído | Worktree isolado de `ed8756b`, comparação com `5e9c4f9`; snapshots/profiling existentes mantidos | Baseline runtime e setup acima; regressões negativas de input/presenter/lookup | Nenhuma comparação de FPS Lake foi feita |
+| 2. Proxy/layout parcialmente escalado — implementado | `fix.cpp`, `layout_policy.h`, `ddraw_scale.*`: admissão HRESULT separada, seed guardado, factory/primária fail-closed | 211 checks COM; 22 checks config/layout; fixtures de fechamento adiado com veto nativo | Renderer e modais proprietários não executados; sem promessa de fallback universal |
+| 2. Startup/identidade — implementado | `launcher.cpp`, `component_contract.h`, `file_identity.h`: EXIT/erro/timeout distintos, retry limitado, mutex usuário/sessão, pins/ABI/hash; DLL confere módulo retornado e fixa seu lifetime | 84 checks startup, 7 ABI na DLL final; fixtures Contour homônimo, pin/reload e export estrangeiro/LastError | Corrida com launcher não participante e falhas de kernel não são eliminadas; [STARTUP-RELIABILITY.md](STARTUP-RELIABILITY.md) |
+| 3. Captura externa perde eixos — corrigido | `scale_geometry.h`, `fix.cpp`: extrapolação assinada por eixo para captura main/child; novo down em margem rejeitado | 129 checks geometria; fixture escalada cobre L/R/M/X, modifiers, repeat-peek e canvas default | Input proprietário, DPI/monitores reais pendentes; [INPUT-RELIABILITY.md](INPUT-RELIABILITY.md) |
+| 3. Deltas fracionários — instrumentado, sem mudança comportamental | `[diagnostics] DetailedInput=0/1`, contadores no par de RVAs admitido | Matemática mostra perda de frações; fixture nunca admite RVAs proprietários | Semântica real não comprovada: acumulação/híbrido continuam desativados |
+| 4. Restore/ReleaseDC e cache — corrigido sinteticamente | `ddraw_scale.cpp`: gerações de owner/primária; invalidar só após sucesso; sem locks próprios em COM/callbacks | 211 checks COM normal/profiling, inclusive invalidação reentrante, HRESULT/LastError e aliases | Perda/restauração real de dispositivo e recarga de bitmaps do aplicativo não executadas |
+| 4. Frame amplo/publicação prematura — corrigido | Papel/extent/caps/flags/destino explícitos; query sem publicação, commit pós-sucesso do mesmo snapshot | Suíte COM e fixtures integradas; [PRESENTER-RELIABILITY.md](PRESENTER-RELIABILITY.md) | Native aliases/Flip/BltBatch/outros caminhos não viram emulação universal |
+| 5. Log síncrono/supressão global — implementado | `session_diagnostics.*`: ring 256, worker por evento, teto 4 MiB; presenter limita pares operação/HRESULT; só registros diagnósticos podem ser descartados | 154 checks em 13 casos isolados, mais 13 verificações do watchdog; COM cobre tabela/limites/reentrância | Sem garantia hard real-time/crash-safe ou persistência sob falha de disco; [DIAGNOSTICS.md](DIAGNOSTICS.md) |
+| 5. Inspector omite host — corrigido | `Inspect-WindowState.py`: host legado/escalado/canvas, propriedade somente no host; sem textos de controles | 4 testes Python | Snapshot read-only não comprova pixels nem responsividade futura |
+| 6. Observação longa — implementado em ferramenta, não ensaiado no Lake | Monitor até 24h, limite de amostras/identidade retida; estatísticas periódicas da DLL | 22 checks métricas + 9 de lifecycle/falhas; nenhum alvo terminado | Ensaios de 15–30 min e 2–4 h não executados; contagens proxy não medem toda memória nativa/GPU |
+| 7. Reparo/remoção parcial nativos — implementado | `setup_engine.*`: recibo persistente, ausências idempotentes, conflito preservado, mensagens dos objetos mantidos, migração INI com backup/journal | 421 checks sandbox, zero falhas, 1 skip opcional de symlink (1314, não PASS) | Worker real de autorremoção/Apps não executado; perda de energia/EDR não simulados; [SETUP-RECOVERY.md](SETUP-RECOVERY.md) |
+| 7. Upgrade/rollback — implementado com limite | `--upgrade`/`--rollback`, archives, renames sem overwrite, registro GUID exclusivo nos testes | Sandbox cobre checkpoints de promoção/retomada/rollback, INI/logs/dados desconhecidos preservados | Apenas uma geração anterior; sem cadeia arbitrária, redo/purge ou coleta automática |
+| 7. Scripts PowerShell legados — **não atualizados** | `Install.ps1`/`Uninstall.ps1` conservados, não usados pelo candidato nativo | Sem nova evidência lifecycle desses scripts | Ainda não oferecem o contrato de recuperação do setup novo; não inferir migração automática entre os dois métodos |
+| 8. Proveniência/promoção de pacote — implementado | `Build-Provenance.ps1`: snapshot antes do compile, comandos reais, BuildId, hashes finais/testes/payload; promoção por diretório/journal; candidate separado de publish | 30 checks provenance, 27 guards de publicação mock; pacote real local verificado byte a byte | Atestação do runner não é assinatura; preflight `HEAD == origin/main` não foi aprovado na branch |
+| 8. Símbolos próprios — integrado | Split DWARF antes de hash/testes; PDB exato do link otimizado, CodeView/MSF GUID/age e recibos por BuildId; CMake ABI aponta à DLL final | 38 cenários splitter; 24 mutantes runtime, 12 setup e 12 GraphicsCheck; suíte obrigatória de recibos | Debug fonte em debugger e MSVC local não executados; stripping não anonimiza CodeView; [SYMBOLS.md](SYMBOLS.md) |
+| 8. Assinatura — **não implementada** | `DevelopmentUnsigned` exige opt-in; `Signed` recusado | Guards rejeitam alegação falsa de assinatura | Certificado, pinning, timestamp/trust e pipeline Signed reais pendentes |
+| 9. Diagnóstico DD7 próprio — implementado, GPU **não executada** | `graphics_check.cpp`: própria janela/DD7/padrões/markers/pixels/controle/cleanup; gates desktop e ausência de áudio operacional | Build x86 + seis self-tests CPU; nenhum carregamento DirectDraw nesses testes | GPU/desktop real, readback e inspeção visual precisam de condições confirmadas; [GRAPHICS-CHECK.md](GRAPHICS-CHECK.md) |
+| 10. Configuração — snapshot implementado | `session_config.h`: schema 1, origem/override/hash, sessão imutável; setup mescla só chaves ausentes | 22 checks política/layout + edição live na fixture; ABI 2 / versão 0.7.0 | UI comum de configuração/seleção de perfis **não implementada** |
+| 10. Posição de janela — **não implementada** | Mantidos dimensionamento/work-area/defaults e comportamento anterior | Fixtures de canvas/host/minimum; não são teste de persistência | Salvar/restaurar posição com DPI/múltiplos monitores segue pendente |
+| 11. Sessão/falhas — parcialmente implementado | GUID de sessão, UTC/tick, FILETIME de criação do processo, build/etapa/códigos; VEH não coleta dump | Testes logger/startup/saída; contador de perda e fallback | Coletor externo de dump e retenção automática entre sessões **não implementados**; recursos PE VERSIONINFO também pendentes |
+| 12. CI x86 — preparado | `.github/workflows/windows-x86.yml`: Zig fixado/MSVC, setup/mocks, sem Lake/assinatura/publicação; símbolos só em dispatch opt-in | YAML/workflow revisado; execução local Zig separada | Não presumir resultado remoto; MinGW GCC/MSVC locais não executados |
+| 12. Matriz Lake/DPI/RDP/hotplug/desempenho — **não executada** | Procedimentos em `VALIDATION.md`, `PERFORMANCE.md`, `OBSERVATION.md` | Nenhuma execução de Lake/áudio/equipamentos nesta revisão | Ambiente legítimo isolado não estabelecido; nenhuma alegação de FPS, leak ou homologação em campo |
 
 ## Contratos preservados
 
@@ -79,5 +86,6 @@ janela inicial lógica 1024×576, mínimo 800×450 limitado à área útil,
 vtables nativas, capacidades, backend ou hooks de terceiros. Sem unload/hot unhook,
 descarte de input/frames, upload ou binário proprietário no Git/pacote.
 
-As atualizações desta matriz registrarão o commit de implementação e os comandos
-realmente executados; itens não concluídos permanecem explicitamente pendentes.
+Itens de produto não implementados acima são escopo restante de engenharia, não
+testes externos meramente bloqueados pelo ambiente. Não há alegação de conclusão
+integral desses itens ou de aprovação de uso operacional.
